@@ -20,6 +20,9 @@ type TurnIdentity struct {
 	UUID        string
 	Path        string
 	StartOffset int64
+	// SessionID is the sessionId Claude stamped on the user record: the
+	// native conversation the turn belongs to.
+	SessionID string
 }
 
 // TurnQuery describes the transcript record a send is looking for.
@@ -69,6 +72,7 @@ type turnRecord struct {
 	Type        string          `json:"type"`
 	Timestamp   string          `json:"timestamp"`
 	IsSidechain bool            `json:"isSidechain"`
+	SessionID   string          `json:"sessionId"`
 	Message     json.RawMessage `json:"message"`
 }
 
@@ -188,7 +192,7 @@ func scanTurnIdentity(q TurnQuery, cursor int64) (TurnIdentity, int64, bool, err
 		if rec.UUID == "" {
 			return TurnIdentity{}, cursor, false, fmt.Errorf("submitted prompt has no transcript UUID; refusing to guess turn identity")
 		}
-		return TurnIdentity{UUID: rec.UUID, Path: q.Path, StartOffset: cursor}, cursor, true, nil
+		return TurnIdentity{UUID: rec.UUID, Path: q.Path, StartOffset: cursor, SessionID: rec.SessionID}, cursor, true, nil
 	}
 }
 
@@ -344,5 +348,5 @@ func readTurnResponse(id TurnIdentity) (*ResponseOutput, bool, error) {
 	if !ended && text.Len() == 0 {
 		return nil, false, nil
 	}
-	return &ResponseOutput{Tool: "claude", Role: "assistant", Content: strings.TrimSpace(text.String()), Timestamp: lastTS}, ended, nil
+	return &ResponseOutput{Tool: "claude", Role: "assistant", Content: strings.TrimSpace(text.String()), Timestamp: lastTS, SessionID: id.SessionID, ClaudeTurnUUID: id.UUID}, ended, nil
 }
