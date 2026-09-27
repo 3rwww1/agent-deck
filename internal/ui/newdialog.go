@@ -3,8 +3,10 @@ package ui
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -648,7 +650,7 @@ func (d *NewDialog) ShowInGroup(groupPath, groupName, defaultPath string, conduc
 		// #1172: preselect the configured default model so users who set
 		// [claude].default_model aren't forced to switch off Sonnet on every
 		// new session. Overrides the empty value set above; left empty when
-		// no (valid, in-catalog) default is configured.
+		// no default is configured.
 		if dm := preselectDefaultModel(userConfig, d.GetSelectedCommand()); dm != "" {
 			d.modelInput.SetValue(dm)
 		}
@@ -892,6 +894,7 @@ func (d *NewDialog) ApplyHighlightedModelSuggestion() {
 		if suggestionIdx < len(d.modelSuggestions) {
 			d.modelInput.SetValue(d.modelSuggestions[suggestionIdx])
 			d.modelInput.SetCursor(len(d.modelInput.Value()))
+			d.dropUnsupportedReasoningEffort()
 		}
 		d.modelNavigated = true
 	}
@@ -1091,12 +1094,12 @@ func (d *NewDialog) filterPathSuggestions() {
 func knownModelIDsForTool(tool string) []string { return session.KnownModelIDsForTool(tool) }
 
 // preselectDefaultModel returns the model ID to prefill in the new-session
-// model field for the given tool. It honors the per-tool configured
-// default_model but only when that value is present in the tool's known-model
-// catalog — an empty default, an unset config, or a stale/typo'd value (e.g.
-// an alias like "opus" or a removed pin) all degrade gracefully to "" so the
-// dialog leaves the model unset and the tool falls back to its own default
-// rather than launching a bogus --model flag (#1172). Today only Claude routes
+// model field for the given tool: the per-tool configured default_model,
+// trimmed. The model catalog is a suggestion source, not an allowlist
+// (#2388): a configured ID the catalog does not know (a model newer than this
+// build, or one the probed CLI hides) passes through with a logged warning
+// instead of being dropped, so the tool reports a typo itself rather than the
+// session silently launching on the tool default. Today only Claude routes
 // its launch model through this dialog field; the other tools apply their
 // default_model at command-build time.
 func preselectDefaultModel(config *session.UserConfig, tool string) string {
@@ -1113,12 +1116,10 @@ func preselectDefaultModel(config *session.UserConfig, tool string) string {
 	if configured = strings.TrimSpace(configured); configured == "" {
 		return ""
 	}
-	for _, id := range knownModelIDsForTool(tool) {
-		if id == configured {
-			return configured
-		}
+	if !slices.Contains(knownModelIDsForTool(tool), configured) {
+		uiLog.Warn("default_model_not_in_catalog", slog.String("tool", tool), slog.String("model", configured))
 	}
-	return ""
+	return configured
 }
 
 func (d *NewDialog) filterModelSuggestions() {
@@ -1387,8 +1388,42 @@ func (d *NewDialog) selectedToolSupportsReasoningEffort() bool {
 	return session.SupportsLaunchReasoningEffort(d.toolKind(d.GetSelectedCommand()))
 }
 
+// reasoningEffortChoices lists "" (tool default) then the efforts the selected
+// tool accepts, narrowed to the typed model when the CLI was probed (#2388).
+// A remote target uses the lists from that host's -capabilities.
 func (d *NewDialog) reasoningEffortChoices() []string {
-	return append([]string{""}, session.LaunchReasoningEffortsForTool(d.toolKind(d.GetSelectedCommand()))...)
+	model := strings.TrimSpace(d.modelInput.Value())
+	if d.remoteTarget {
+		if tool := d.remoteCatalogTool(d.GetSelectedCommand()); tool != nil && len(tool.ReasoningEfforts) > 0 {
+			efforts := tool.ReasoningEfforts
+			if perModel := tool.ModelEfforts[model]; len(perModel) > 0 {
+				efforts = perModel
+			}
+			return append([]string{""}, efforts...)
+		}
+	}
+	return append([]string{""}, session.LaunchReasoningEffortsForModel(d.toolKind(d.GetSelectedCommand()), model)...)
+}
+
+// dropUnsupportedReasoningEffort clears a selected effort the current tool and
+// model no longer accept, so a model change never submits an effort the
+// launch would reject (#2388). A still-valid selection is kept.
+func (d *NewDialog) dropUnsupportedReasoningEffort() {
+	if !slices.Contains(d.reasoningEffortChoices(), d.reasoningEffort) {
+		d.reasoningEffort = ""
+	}
+}
+
+func (d *NewDialog) remoteCatalogTool(name string) *session.RemoteCreationTool {
+	if d.remoteCatalog == nil {
+		return nil
+	}
+	for i := range d.remoteCatalog.Tools {
+		if d.remoteCatalog.Tools[i].Name == name {
+			return &d.remoteCatalog.Tools[i]
+		}
+	}
+	return nil
 }
 
 func (d *NewDialog) cycleReasoningEffort(delta int) {
@@ -1864,16 +1899,7 @@ func (d *NewDialog) updateToolOptions() {
 	d.modelSuggestionHidden = false
 	d.modelNavigated = false
 	d.filterModelSuggestions()
-	validEffort := d.reasoningEffort == ""
-	for _, effort := range session.LaunchReasoningEffortsForTool(cmd) {
-		if effort == d.reasoningEffort {
-			validEffort = true
-			break
-		}
-	}
-	if !validEffort {
-		d.reasoningEffort = ""
-	}
+	d.dropUnsupportedReasoningEffort()
 	switch {
 	case session.IsClaudeCompatible(cmd):
 		d.toolOptions = d.claudeOptions
@@ -2758,6 +2784,7 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 			d.modelSuggestionCursor = 0
 			d.modelNavigated = false
 			d.filterModelSuggestions()
+			d.dropUnsupportedReasoningEffort()
 		}
 	case focusMultiRepo:
 		// When editing a multi-repo path, forward keystrokes to pathInput.
