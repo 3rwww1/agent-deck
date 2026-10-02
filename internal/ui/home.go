@@ -21422,6 +21422,8 @@ type groupRenderStats struct {
 	sessionCount int
 	running      int
 	waiting      int
+	tinted       int
+	tint         string
 }
 
 func (h *Home) buildGroupRenderStats(snapshot map[string]sessionRenderState) map[string]groupRenderStats {
@@ -21453,11 +21455,21 @@ func (h *Home) buildGroupRenderStats(snapshot map[string]sessionRenderState) map
 		directSessions := 0
 		directRunning := 0
 		directWaiting := 0
+		directTinted := 0
+		directTint := ""
 		for _, sess := range g.Sessions {
 			if sess.IsArchived() != viewArchived {
 				continue
 			}
 			directSessions++
+			// Same field the session row paints (renderSessionItem), so a
+			// group name and its row can never disagree.
+			if sess.Color != "" {
+				directTinted++
+				if directTint == "" || sess.Color < directTint {
+					directTint = sess.Color
+				}
+			}
 			state, ok := snapshot[sess.ID]
 			status := sess.Status
 			if ok {
@@ -21479,6 +21491,12 @@ func (h *Home) buildGroupRenderStats(snapshot map[string]sessionRenderState) map
 			entry.sessionCount += directSessions
 			entry.running += directRunning
 			entry.waiting += directWaiting
+			entry.tinted += directTinted
+			// Smallest colour string wins: the walk runs over a map, so a
+			// fixed choice keeps the paint stable when colours differ.
+			if directTint != "" && (entry.tint == "" || directTint < entry.tint) {
+				entry.tint = directTint
+			}
 			stats[ancestor] = entry
 
 			idx := strings.LastIndex(ancestor, "/")
@@ -21607,6 +21625,12 @@ func (h *Home) renderGroupItem(
 
 	// Use precomputed recursive stats (group + descendants) for this render pass.
 	stats := groupStats[group.Path]
+	// A collapsed group hides the session whose name is tinted; carry the tint
+	// to the group name so the signal stays visible. Selected rows keep the
+	// selected style, expanded groups already show the tinted row.
+	if stats.tinted > 0 && !group.Expanded && !selected {
+		nameStyle = nameStyle.Foreground(lipgloss.Color(stats.tint))
+	}
 	countStr := countStyle.Render(fmt.Sprintf(" (%d)", stats.sessionCount))
 	if h.compactEmbeddedSidebar() {
 		prefix := ""
