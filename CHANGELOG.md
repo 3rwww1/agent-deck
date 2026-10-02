@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Errors from closing files after writing (queues, logs, lock files, update plans) are now reported instead of ignored, so a failed flush is no longer silent.
+
 ## [1.16.22] - 2026-09-28
 
 - **Upgrading:** if you reach `agent-deck web` through a reverse proxy or Tailscale Serve, add its host name to `[web] allowed_hosts` before upgrading (or pass `--allowed-host`); otherwise the web UI answers it with 421.
