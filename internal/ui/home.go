@@ -659,6 +659,12 @@ type Home struct {
 	// keeps stopped sessions visible: Open then also hides stopped.
 	activeFilterHideStopped bool
 
+	// hiddenToolBadge is the effective default tool (default_tool, or claude
+	// when unset) when [display] hide_default_tool_badge is on: rows running
+	// it skip the tool badge. Empty means show every badge. Recomputed when
+	// the settings panel saves.
+	hiddenToolBadge string
+
 	// showSessionTimestamps gates the dim "Nm ago" badge on each session row.
 	// Cached here so all rows of a single frame see the same value even if
 	// the user toggles the setting mid-frame. Reloaded after the panel saves.
@@ -2079,6 +2085,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		h.defaultFilter = cfg.Display.GetDefaultFilter()
 		h.activeFilterLabel = cfg.Display.ActiveFilterLabel
 		h.activeFilterExcludes = cfg.Display.GetActiveFilterExcludes()
+		h.hiddenToolBadge = hiddenToolBadgeFor(cfg)
 		session.ConfigureTmuxDisplay(cfg.Display)
 		h.showSessionTimestamps = cfg.Display.ShowSessionTimestamps
 		h.showPaneTitles = cfg.Display.ShowPaneTitles
@@ -10082,6 +10089,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.reloadHotkeysFromConfig()
 				h.showSessionTimestamps = config.Display.ShowSessionTimestamps
 				h.showPaneTitles = config.Display.ShowPaneTitles
+				h.hiddenToolBadge = hiddenToolBadgeFor(config)
 				h.setAccountSlotsConfigured(len(session.ConfiguredAccountNames(config)) > 0)
 				h.applySavedLayoutSettings(config.UI)
 				h.rebuildFlatItemsPreservingSelection(h.captureSelectedItemIdentity())
@@ -15883,10 +15891,7 @@ func (h *Home) quickCreateSession() tea.Cmd {
 
 	// Fallback for tool
 	if tool == "" {
-		tool = session.GetDefaultTool()
-	}
-	if tool == "" {
-		tool = "claude"
+		tool = effectiveDefaultTool(session.GetDefaultTool())
 	}
 	if command == "" && tool != "shell" {
 		if toolDef := session.GetToolDef(tool); toolDef != nil {
@@ -16045,10 +16050,7 @@ func (h *Home) groupDialogPathCandidates() []string {
 // cursor-context tool inheritance so the zoxide flow always lands on the
 // user's chosen default (Claude, unless overridden in config.toml).
 func (h *Home) quickCreateSessionAt(projectPath string) tea.Cmd {
-	tool := session.GetDefaultTool()
-	if tool == "" {
-		tool = "claude"
-	}
+	tool := effectiveDefaultTool(session.GetDefaultTool())
 	var command string
 	if tool == "shell" {
 		command = ""
@@ -21984,7 +21986,7 @@ func (h *Home) renderSessionItem(
 	}
 
 	tool := toolStyle.Render(" " + instTool)
-	if listWidth > 0 && listWidth < 40 {
+	if (listWidth > 0 && listWidth < 40) || h.toolBadgeHidden(instTool) {
 		tool = ""
 	}
 
@@ -22771,7 +22773,7 @@ func (h *Home) renderRemoteSessionItemAtWidth(b *strings.Builder, item session.I
 	}
 
 	toolStr := ""
-	if rs.Tool != "" {
+	if rs.Tool != "" && !h.toolBadgeHidden(rs.Tool) {
 		// #1091: use brand-specific color (claude=orange, gemini=purple, …)
 		// so SSH-remote rows match local rows. Falls back to ColorTextDim
 		// for unknown/empty tool names via GetToolStyle.
