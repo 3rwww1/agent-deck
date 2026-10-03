@@ -568,18 +568,16 @@ func (n *TransitionNotifier) resolveParentIDForInbox(event TransitionNotificatio
 // comes with the terminal reason.
 func (n *TransitionNotifier) resolveInboxParent(event TransitionNotificationEvent, child *Instance, byID map[string]*Instance) (*Instance, string) {
 	parentID := strings.TrimSpace(child.ParentSessionID)
-	// Top-level conductor self-suppress (issue #824 cause B): the root is not
-	// an orphan, drop silently.
-	if parentID == "" && isConductorSessionTitle(child.Title) {
+	// Top-level (or self-pointing) conductor self-suppress (issue #824 cause
+	// B): the root is not an orphan, drop silently. The same predicate decides
+	// what the cursor export ships (remote_talkback.go).
+	if isSelfSuppressedConductor(child) {
 		return nil, deadLetterReasonSelfConductor
 	}
 	// Orphan-on-creation guard (issue #805 cause A): log one WARN per orphan.
 	if parentID == "" {
 		n.logOrphanOnce(event, child.ID)
 		return nil, deadLetterReasonOrphan
-	}
-	if parentID == child.ID && isConductorSessionTitle(child.Title) {
-		return nil, deadLetterReasonSelfConductor
 	}
 	// Parent referenced but not present in this profile's registry: removed
 	// mid-flight, or the child's parent lives in a DIFFERENT profile (we only
