@@ -69,7 +69,7 @@ agent-deck add -t "Quick" -c claude --attach .   # create → start → drop int
 ```
 
 Notes:
-- Parent auto-link is enabled by default when `AGENT_DECK_SESSION_ID` is present and neither `--parent` nor `--no-parent` is passed.
+- Parent auto-link is enabled by default when `AGENT_DECK_SESSION_ID` is present and neither `--parent` nor `--no-parent` is passed. When the calling session is itself a sub-session, the new session starts top-level by default; set `[launch] nest_under_parent = true` to link it under the caller's parent instead (applies to `add` and `launch`, see config-reference.md).
 - `--attach` does create → start → attach in one step. Without an interactive terminal (or with `--json`) it exits non-zero with a clear error, leaving the session created and started so you can attach later.
 - `--parent` and `--no-parent` are mutually exclusive.
 - Explicit `-g/--group` overrides inherited parent group.
