@@ -35,6 +35,9 @@ const (
 type hookTransitionCandidate struct {
 	ToStatus  string
 	Timestamp time.Time
+	// Event is the hook event behind the candidate (Stop, PermissionRequest,
+	// Notification, ...). Empty for candidates built without one.
+	Event string
 }
 
 type TransitionDaemon struct {
@@ -913,6 +916,9 @@ func (d *TransitionDaemon) recordTerminalTurns(
 
 	for id, to := range statuses {
 		if !isRecordableTurnStatus(to) {
+			if notifyEnabled {
+				d.rememberHeldSendFromPoll(byID[id], to)
+			}
 			continue
 		}
 		inst := byID[id]
@@ -1312,6 +1318,29 @@ func readHookStatusFile(instanceID string) *HookStatus {
 	return hookStatus
 }
 
+// rememberHeldSendFromPoll remembers the sender of a tagged send whose turn
+// handed off to background work, seen from the poll rather than a Stop hook
+// (issue #2473). A hook-less Claude session ([claude] hooks_enabled = false)
+// never yields a hook candidate, and neither does a Stop the notify daemon
+// missed while it was down; on both, the merged status stays running for the
+// whole workflow, so the send turn is never recorded. Without this the task
+// turn that settles the work would carry no sender and the sender would get
+// no reply. rememberHeldSend is idempotent per turn and skips a turn the
+// journal already holds, so the hook path and this one may both see the same
+// held turn, and a send turn answered during a menu or a lapsed hold is not
+// remembered again when the work resumes.
+func (d *TransitionDaemon) rememberHeldSendFromPoll(inst *Instance, status string) {
+	if inst == nil || normalizeStatusString(status) != string(StatusRunning) {
+		return
+	}
+	if !instanceAcceptsTransitionEvents(inst) || !backgroundWorkHoldsTurn(inst) {
+		return
+	}
+	if facts, ok := instanceTurnFacts(inst); ok {
+		rememberHeldSend(inst.ID, facts)
+	}
+}
+
 func (d *TransitionDaemon) emitHookTransitionCandidates(
 	profile string,
 	byID map[string]*Instance,
@@ -1332,6 +1361,24 @@ func (d *TransitionDaemon) emitHookTransitionCandidates(
 		// signal; suppress poll-inferred candidates for it. Interactive
 		// sessions (no completion record) are unaffected.
 		if CompletionRecordExists(profile, id) {
+			continue
+		}
+
+		// Issue #2473: a Stop hook that ended the turn by handing off to
+		// background work (a Workflow, background agents, shells, a Monitor)
+		// is not a finished turn. The merged status keeps such a session
+		// running; the hook file alone must not emit running -> waiting for
+		// it. The real edge is emitted when the work reports back and the
+		// session settles (snapshot path, trigger "task"). A permission
+		// request or elicitation is never held: the child is blocked on
+		// input while the work runs, and the parent must be told.
+		if !hookEventBlocksTurn(candidate.Event) &&
+			normalizeStatusString(current[id]) == string(StatusRunning) && backgroundWorkHoldsTurn(inst) {
+			// The held turn may be the only one that names a tagged send's
+			// sender; remember it so the turn that settles the work replies.
+			if facts, ok := instanceTurnFacts(inst); ok {
+				rememberHeldSend(inst.ID, facts)
+			}
 			continue
 		}
 
@@ -1405,20 +1452,20 @@ func terminalHookTransitionCandidate(tool string, hs *HookStatus) (hookTransitio
 	case "claude":
 		// SessionStart is intentionally excluded (initial prompt isn't task completion).
 		if event == "stop" || event == "permissionrequest" || event == "notification" {
-			return hookTransitionCandidate{ToStatus: to, Timestamp: hs.UpdatedAt}, true
+			return hookTransitionCandidate{ToStatus: to, Timestamp: hs.UpdatedAt, Event: hs.Event}, true
 		}
 	case "codex":
 		if isCodexTerminalHookEvent(event) {
-			return hookTransitionCandidate{ToStatus: to, Timestamp: hs.UpdatedAt}, true
+			return hookTransitionCandidate{ToStatus: to, Timestamp: hs.UpdatedAt, Event: hs.Event}, true
 		}
 	case "cursor":
 		// sessionStart is intentionally excluded (initial prompt isn't task completion).
 		if event == "stop" {
-			return hookTransitionCandidate{ToStatus: to, Timestamp: hs.UpdatedAt}, true
+			return hookTransitionCandidate{ToStatus: to, Timestamp: hs.UpdatedAt, Event: hs.Event}, true
 		}
 	case "hermes":
 		if event == "post_llm_call" || event == "postllmcall" || event == "onsessionend" || event == "on_session_end" {
-			return hookTransitionCandidate{ToStatus: to, Timestamp: hs.UpdatedAt}, true
+			return hookTransitionCandidate{ToStatus: to, Timestamp: hs.UpdatedAt, Event: hs.Event}, true
 		}
 	}
 	return hookTransitionCandidate{}, false

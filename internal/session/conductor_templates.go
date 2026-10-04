@@ -6,6 +6,7 @@ import "strings"
 // generated template. Installers compare its fully rendered form byte-for-byte
 // before migrating, so any user customization is preserved.
 func previousConductorInstructionsTemplate(template string) string {
+	template = preBackgroundWorkConductorInstructionsTemplate(template)
 	// Issue #2469 (comms redesign): the heartbeat section gained the
 	// prompt-time drain wording and the record tiers paragraph. Revert them so
 	// a conductor written by v1.16.23 and earlier is recognised as generated.
@@ -48,6 +49,18 @@ fallback — together they guarantee no completion is missed whether you are bus
 		`| Create a new session with a worktree |`,
 		`| Create a new {AGENT_DISPLAY} session with a worktree |`, 1)
 	return template
+}
+
+// conductorBackgroundWorkGuidance is the sentence issue #2473 added to the
+// shared template's substate paragraph.
+const conductorBackgroundWorkGuidance = " `background-work` (shown as coarse status `running`) means the child's turn ended but a Workflow, background agents, shells or a Monitor it started are still in flight (`background_work` in `session show --json` names the task and its n/m progress); leave it alone, it reports back and settles to `waiting` by itself."
+
+// preBackgroundWorkConductorInstructionsTemplate reconstructs the template as
+// v1.16.24 shipped it, before #2473 added the background-work sentence, so a
+// conductor written by v1.16.24 is recognised as generated and migrated.
+// Per-name templates carry no substate paragraph, so this is a no-op there.
+func preBackgroundWorkConductorInstructionsTemplate(template string) string {
+	return strings.Replace(template, conductorBackgroundWorkGuidance, "", 1)
 }
 
 // preSubstateGuidanceConductorInstructionsTemplate reconstructs the shared
@@ -105,13 +118,17 @@ const (
 // those releases is treated as user-edited and left alone.
 func conductorInstructionsGenerations(template string) []string {
 	var gens []string
-	// The urgent-tier wording changed after v1.16.24 (replies to a send are
-	// info now); a file carrying the previous sentence is still generated.
-	// Chain: current -> the pre-strict-rule wording (unreleased main builds)
+	// Chain: current -> minus the #2473 background-work sentence (unreleased
+	// main builds) -> minus the strict urgent rule (unreleased main builds)
 	// -> exactly what v1.16.24 shipped. The intermediate "new sentence with the
 	// old reply format" was never released, so it is not a generation.
-	prevRule := preStrictUrgentRuleConductorInstructionsTemplate(template)
-	if prevRule != template {
+	base := template
+	if noBG := preBackgroundWorkConductorInstructionsTemplate(template); noBG != template {
+		gens = append(gens, noBG)
+		base = noBG
+	}
+	prevRule := preStrictUrgentRuleConductorInstructionsTemplate(base)
+	if prevRule != base {
 		gens = append(gens, prevRule)
 	}
 	if v11624 := preHumanTierConductorInstructionsTemplate(prevRule); v11624 != prevRule {
@@ -180,7 +197,7 @@ Commands accept: **exact title**, **ID prefix** (e.g., first 4 chars), **path**,
 | ` + "`" + `idle` + "`" + ` (gray) | Waiting, but user acknowledged | User knows about it. Skip unless asked. |
 | ` + "`" + `error` + "`" + ` (red) | Crashed, missing, or wedged (auth/model failure) | Check the substate first. Then try ` + "`" + `session restart` + "`" + `; if that fails, escalate. |
 
-**Substate (Claude sessions only; refines status in ` + "`" + `list` + "`" + `/` + "`" + `show` + "`" + ` JSON):** ` + "`" + `auth-401` + "`" + ` covers two different pane banners. A credential banner (` + "`" + `Please run /login` + "`" + `, ` + "`" + `API Error: 401` + "`" + `) means the fleet is HOLDING the session; restarting will NOT fix it. Check ` + "`" + `session show --json <id>` + "`" + ` for the ` + "`" + `auth_hold` + "`" + ` object (the authoritative source, present even after the pane exits) and escalate for re-login. A dropped-socket banner (` + "`" + `socket connection closed` + "`" + `) also classifies as ` + "`" + `auth-401` + "`" + ` but is NOT held and IS restart-recoverable: restart it. ` + "`" + `model-unavailable` + "`" + ` means the selected model is down (shows as error, not running); self-heal currently only observes this and takes no action, so switch it yourself with ` + "`" + `agent-deck -p <PROFILE> session set <id> model <model>` + "`" + ` then ` + "`" + `agent-deck -p <PROFILE> session restart <id>` + "`" + `. ` + "`" + `idle-at-empty-prompt` + "`" + ` (shown as coarse status ` + "`" + `idle` + "`" + ` or ` + "`" + `waiting` + "`" + `) means the session is genuinely sitting at its prompt with nothing happening. Never restart-loop an ` + "`" + `error` + "`" + ` session that ` + "`" + `auth_hold` + "`" + ` confirms is credential-held.
+**Substate (Claude sessions only; refines status in ` + "`" + `list` + "`" + `/` + "`" + `show` + "`" + ` JSON):** ` + "`" + `auth-401` + "`" + ` covers two different pane banners. A credential banner (` + "`" + `Please run /login` + "`" + `, ` + "`" + `API Error: 401` + "`" + `) means the fleet is HOLDING the session; restarting will NOT fix it. Check ` + "`" + `session show --json <id>` + "`" + ` for the ` + "`" + `auth_hold` + "`" + ` object (the authoritative source, present even after the pane exits) and escalate for re-login. A dropped-socket banner (` + "`" + `socket connection closed` + "`" + `) also classifies as ` + "`" + `auth-401` + "`" + ` but is NOT held and IS restart-recoverable: restart it. ` + "`" + `model-unavailable` + "`" + ` means the selected model is down (shows as error, not running); self-heal currently only observes this and takes no action, so switch it yourself with ` + "`" + `agent-deck -p <PROFILE> session set <id> model <model>` + "`" + ` then ` + "`" + `agent-deck -p <PROFILE> session restart <id>` + "`" + `. ` + "`" + `idle-at-empty-prompt` + "`" + ` (shown as coarse status ` + "`" + `idle` + "`" + ` or ` + "`" + `waiting` + "`" + `) means the session is genuinely sitting at its prompt with nothing happening. ` + "`" + `background-work` + "`" + ` (shown as coarse status ` + "`" + `running` + "`" + `) means the child's turn ended but a Workflow, background agents, shells or a Monitor it started are still in flight (` + "`" + `background_work` + "`" + ` in ` + "`" + `session show --json` + "`" + ` names the task and its n/m progress); leave it alone, it reports back and settles to ` + "`" + `waiting` + "`" + ` by itself. Never restart-loop an ` + "`" + `error` + "`" + ` session that ` + "`" + `auth_hold` + "`" + ` confirms is credential-held.
 
 ## Heartbeat Protocol
 
