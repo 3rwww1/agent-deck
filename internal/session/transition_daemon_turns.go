@@ -65,8 +65,15 @@ func (d *TransitionDaemon) emitTurn(profile string, inst *Instance, byID map[str
 	}
 	event.LastOutputHash = transitionEventOutputHash(inst)
 	statsParent := statsParentFor(inst)
+	selfConductor := isSelfSuppressedConductor(inst)
 
 	if !classified {
+		if selfConductor {
+			// Issue #2481: no transcript, so no sender to answer; the notifier
+			// would drop it as self_conductor after a registry load.
+			d.commsStatusEdge(inst, from, to, event.Timestamp)
+			return dropSelfConductorTurn(event, true), true
+		}
 		// Legacy signal, no text: emit as before. The notifier's dedup is the
 		// only improvement available without a transcript.
 		result := d.notifier.NotifyTransition(event)
@@ -89,12 +96,36 @@ func (d *TransitionDaemon) emitTurn(profile string, inst *Instance, byID map[str
 		}
 	}
 
+	// Issue #2481: a top-level conductor's own turn reaches no inbox; only a
+	// turn that answers a tagged send (its reply goes to the asker) or carries
+	// a completion sentinel (the completion ledger) needs the rest of the
+	// path. Drop the others before tiering, journaling, stats and the
+	// notifier's registry load: they were 42% of all transition frames.
+	if selfConductor && !facts.HasDone &&
+		!eventAnswersSend(TransitionNotificationEvent{FromID: facts.FromID, Trigger: facts.Trigger}) {
+		// One bus frame per turn, as the noise rule gave before: a repeat
+		// sighting publishes only when the child was seen to run again.
+		seen := TurnJournalEntry{UUID: facts.UUID, TextHash: facts.TextHash, Status: to}
+		repeat := d.lastSelfTurn[inst.ID] == seen
+		if d.lastSelfTurn == nil {
+			d.lastSelfTurn = map[string]TurnJournalEntry{}
+		}
+		d.lastSelfTurn[inst.ID] = seen
+		return dropSelfConductorTurn(event, observedFlip || !repeat), true
+	}
+
 	cfg := ResolveInboxConfig(parentTitleFor(inst, byID))
 	if !cfg.GetQuestionWakes() {
 		facts.Question = false
 	}
 	prev := LastTurnJournalEntry(inst.ID)
-	tier := ClassifyTurnTier(facts, to, prev)
+	classPrev := prev
+	if last, ok := d.lastSelfTurn[inst.ID]; ok && prev == nil {
+		// A conductor reparented after its last (skipped, unjournaled) turn:
+		// a re-observation of that turn is not news for the new parent.
+		classPrev = &last
+	}
+	tier := ClassifyTurnTier(facts, to, classPrev)
 	if tier == TurnTierNoise && observedFlip && !d.journaledThisRun(profile, inst.ID, facts.UUID) {
 		tier = TurnTierUrgent // a real turn the transcript cannot distinguish; never silent
 	}
@@ -241,6 +272,22 @@ func (d *TransitionDaemon) forgetJournaledTurnsOfRunning(profile string, statuse
 		}
 	}
 }
+
+// dropSelfConductorTurn is the result the notifier would have produced for a
+// top-level conductor's own turn. The bus frame (when publish) is kept so
+// event consumers still see the edge; nothing else is written.
+func dropSelfConductorTurn(event TransitionNotificationEvent, publish bool) TransitionNotificationEvent {
+	event.DeliveryResult = transitionDeliveryDropped
+	event.DeadLetterReason = deadLetterReasonSelfConductor
+	if publish {
+		publishSelfTurnFrame("session.transition", event)
+	}
+	return event
+}
+
+// publishSelfTurnFrame is publishTransitionEvent; tests count its calls (the
+// process-wide bus can be closed only once per test binary).
+var publishSelfTurnFrame = publishTransitionEvent
 
 // noteDoneEmitted records that emitTurn already delivered this completion so
 // emitDoneSignals (which reads the hook file's done fields) does not emit a
