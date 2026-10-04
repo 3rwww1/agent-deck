@@ -108,6 +108,11 @@ type TurnFacts struct {
 	// Done is the completion sentinel when HasDone.
 	Done    DoneSignal
 	HasDone bool
+	// TypedCommand reports that the turn was started by a slash command a
+	// person typed: a non-meta command record without scheduled turnOrigin,
+	// possibly followed by a meta expansion. Trigger stays system; the done-repeat check
+	// (issue #2481) reads this to treat the turn as started by a person.
+	TypedCommand bool
 	// Pending means the Stop hook outran the transcript flush: the newest
 	// main-chain record is a user record with no assistant reply yet.
 	Pending bool
@@ -217,6 +222,7 @@ func classifyTranscriptTail(lines []string) TurnFacts {
 				return facts
 			}
 			facts.Trigger, facts.FromID = classifyTrigger(rec)
+			facts.TypedCommand = transcriptTypedCommand(lines[:i+1])
 			return facts
 		}
 	}
@@ -226,6 +232,32 @@ func classifyTranscriptTail(lines []string) TurnFacts {
 		facts.Pending = true
 	}
 	return facts
+}
+
+// transcriptTypedCommand finds the command record behind a prompt's meta
+// expansion. Never cross an assistant record into an earlier turn.
+func transcriptTypedCommand(lines []string) bool {
+	for i := len(lines) - 1; i >= 0; i-- {
+		var rec transcriptTurnRecord
+		if err := json.Unmarshal([]byte(lines[i]), &rec); err != nil || rec.IsSidechain {
+			continue
+		}
+		if rec.Type == "assistant" {
+			return false
+		}
+		if rec.Type != "user" || userRecordIsToolResult(rec.Message.Content) {
+			continue
+		}
+		if rec.TurnOrigin == "scheduled" {
+			return false
+		}
+		if rec.IsMeta {
+			continue
+		}
+		text := strings.TrimSpace(transcriptText(rec.Message.Content))
+		return strings.HasPrefix(text, "<command-name>") || strings.HasPrefix(text, "<command-message>")
+	}
+	return false
 }
 
 // classifyTrigger maps the user record that started a turn to a trigger kind.
