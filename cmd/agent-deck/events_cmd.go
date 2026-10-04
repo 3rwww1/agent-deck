@@ -111,6 +111,7 @@ func handleEventsFollow(profile string, args []string) {
 	if bus.ReadOnly() {
 		defer bus.Close()
 	}
+	defer bus.Want(followDemandKinds(kinds)...)()
 	sub, err := bus.Subscribe(ctx, events.Cursor(*afterFlag))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: events follow: %v\n", err)
@@ -134,6 +135,19 @@ func handleEventsFollow(profile string, args []string) {
 		fmt.Fprintf(os.Stderr, "Error: events follow: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// followDemandKinds returns the on-demand kinds (tmux.output) a follower
+// with this --kind filter prints. Those payload-less kinds are only written
+// while such a follower runs, so it takes a lease on each of them.
+func followDemandKinds(kinds []string) []string {
+	var wanted []string
+	for _, k := range events.DemandKinds {
+		if eventMatches(events.Frame{Kind: k}, kinds, "") {
+			wanted = append(wanted, k)
+		}
+	}
+	return wanted
 }
 
 func eventMatches(f events.Frame, kinds []string, sessionID string) bool {
