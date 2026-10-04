@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,8 +239,8 @@ func TestCommsIngest_UnknownInstancesAreLeftForTheirProfile(t *testing.T) {
 	if got, _ := ReadCommsSpool("someone-elses-child"); len(got) != 1 {
 		t.Fatalf("foreign spool consumed: %+v", got)
 	}
-	if recs := f.ledgerRecords(t); len(recs) != 0 {
-		t.Fatalf("foreign spool committed: %+v", recs)
+	if _, err := comms.OpenReader("default"); !errors.Is(err, comms.ErrNoLedger) {
+		t.Fatalf("a foreign entry alone must not even create this profile's ledger: %v", err)
 	}
 }
 
@@ -657,8 +658,9 @@ func TestCommsIngest_ProductionWiringAndShutdown(t *testing.T) {
 	for _, r := range recs {
 		kinds[r.Kind+":"+r.Tool]++
 	}
-	if len(recs) != 3 || kinds["turn:claude"] != 1 || kinds["turn:codex"] != 1 || kinds["status:shell"] != 1 {
-		t.Fatalf("ledger records: %v %+v", kinds, recs)
+	// One wake record per wake the inbox path typed (P2 measurement).
+	if len(recs) != 3+*f.sends || kinds["turn:claude"] != 1 || kinds["turn:codex"] != 1 || kinds["status:shell"] != 1 || kinds["wake:"] != *f.sends {
+		t.Fatalf("ledger records (%d inbox wakes): %v %+v", *f.sends, kinds, recs)
 	}
 	dir, _ := comms.Dir("default")
 	f.d.shutdown()
@@ -852,4 +854,108 @@ func TestCommsIngest_ConflictingStatusReplayIsQuarantined(t *testing.T) {
 	if q, _ := os.ReadDir(filepath.Join(CommsSpoolDir(), "conflict", f.shell.ID)); len(q) != 1 {
 		t.Fatalf("conflicting status entry not quarantined: %d files", len(q))
 	}
+}
+
+// P2 measurement rows: a machine wake on the inbox path (typed nudge,
+// digest, Stop block) and a session re-reading another one become wake and
+// call records, so `msg stats` measures both delivery paths from the
+// ledger alone. Neither is ever delivered to anyone.
+func TestCommsIngest_WakesAndReadCallsAreMeasurementRecords(t *testing.T) {
+	f := newCommsFixture(t)
+	ev := TransitionNotificationEvent{ChildSessionID: f.child.ID, ChildTitle: "board-zero", ToStatus: "waiting",
+		Tier: TurnTierUrgent, Text: "need a decision", TargetKind: "parent", Profile: "default"}
+	f.d.notifier.fireWakeNudge(f.parent, ev)
+	if !f.d.notifier.fireDigestNudge(f.parent, "default", DigestNudgeMessage(2, 1)) {
+		t.Fatal("digest nudge not sent")
+	}
+	SpoolCommsWake(f.parent.ID, "inbox", "stop", "Child session(s) completed while you were busy", "")
+	SpoolCommsCall(f.parent.ID, comms.CallSessionOutput, f.child.ID)
+	SpoolCommsCall("", comms.CallInboxDrain, f.parent.ID) // a shell, not a session: not counted
+	f.d.ingestCommsSpool("default", f.byID)
+
+	var wakes, calls []comms.Record
+	for _, r := range f.ledgerRecords(t) {
+		switch r.Kind {
+		case comms.KindWake:
+			wakes = append(wakes, r)
+		case comms.KindCall:
+			calls = append(calls, r)
+		}
+	}
+	if len(wakes) != 3 {
+		t.Fatalf("want 3 wake records (urgent nudge, digest, Stop block), got %+v", wakes)
+	}
+	for _, w := range wakes {
+		if w.From != "agent-deck" || len(w.To) != 1 || w.To[0] != f.parent.ID || w.Trigger != "inbox" || w.Text == "" || w.Key == "" {
+			t.Fatalf("wake record %+v", w)
+		}
+		if comms.Deliverable(w, f.parent.ID) {
+			t.Fatal("a wake record must never be delivered")
+		}
+	}
+	if wakes[0].Via != "tmux" || !strings.Contains(wakes[0].Text, "need a decision") || wakes[2].Via != "stop" || wakes[2].State != comms.StateInjected {
+		t.Fatalf("wake transports: %+v", wakes)
+	}
+	if len(calls) != 1 || calls[0].From != f.parent.ID || calls[0].State != comms.CallSessionOutput || calls[0].Ref != f.child.ID || calls[0].Tool != "claude" {
+		t.Fatalf("call records %+v", calls)
+	}
+	// Replayed spool entries (a crash before removal) are duplicates.
+	before := len(f.ledgerRecords(t))
+	f.d.ingestCommsSpool("default", f.byID)
+	if after := len(f.ledgerRecords(t)); after != before {
+		t.Fatalf("a second pass added records: %d -> %d", before, after)
+	}
+
+	// Switch off: a wake spools nothing.
+	t.Cleanup(SetCommsLedgerForTest(false))
+	SetCommsLedgerForTest(false)
+	SpoolCommsWake(f.parent.ID, "inbox", "tmux", "x", "")
+	if entries, _ := ReadCommsSpool(f.parent.ID); len(entries) != 0 {
+		t.Fatalf("ledger off must spool nothing: %+v", entries)
+	}
+}
+
+// Canary finding (2026-10-04): with the ledger on, the daemon created a
+// ledger directory for every name in the profile list, junk included
+// ('*', 'Total:', typos). A profile gets a ledger only when one of its own
+// sessions has spooled something, and a name that is not a plain profile
+// name never gets one.
+func TestCommsIngest_OnlyRealProfilesWithEntriesGetALedgerDir(t *testing.T) {
+	f := newCommsFixture(t)
+	spoolTurn(t, CommsSpoolEntry{Harness: "codex", Event: "agent-turn-complete", Instance: f.codex.ID, SessionID: "th", TurnID: "t1", Text: "x"})
+	for _, junk := range []string{"totally-bogus-typo-xyz", "perosnal", "*", "Total:", "_test*"} {
+		f.d.ingestCommsSpool(junk, map[string]*Instance{}) // a profile with no sessions
+	}
+	root := filepath.Dir(mustCommsDir(t, "default"))
+	entries, _ := os.ReadDir(root)
+	if len(entries) != 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("ledger dirs created for profiles with no sessions: %v", names)
+	}
+	f.d.ingestCommsSpool("default", f.byID)
+	if entries, _ = os.ReadDir(root); len(entries) != 1 || entries[0].Name() != "default" {
+		t.Fatalf("the real profile with an entry gets its ledger: %v", entries)
+	}
+	for _, bad := range []string{"*", "Total:", "_test*", "../x"} {
+		if _, err := comms.Dir(bad); err == nil {
+			t.Fatalf("comms.Dir accepted %q", bad)
+		}
+	}
+	for _, good := range []string{"default", "personal", "work-2", "a.b_c", "my work"} {
+		if _, err := comms.Dir(good); err != nil {
+			t.Fatalf("comms.Dir refused %q: %v", good, err)
+		}
+	}
+}
+
+func mustCommsDir(t *testing.T, profile string) string {
+	t.Helper()
+	dir, err := comms.Dir(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

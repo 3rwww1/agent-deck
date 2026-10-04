@@ -43,13 +43,33 @@ const (
 	scanTimeout = 10 * time.Second
 )
 
+// junkProfileChars are characters no profile name agent-deck creates
+// carries but that show up when a listing is parsed as profile names
+// ('*', 'Total:', '[x]'): such a name never gets a ledger directory.
+const junkProfileChars = "*?[]:"
+
+// validProfileName accepts what agent-deck itself accepts as a profile
+// (any single path element) except glob characters, ':' and control
+// characters.
+func validProfileName(profile string) bool {
+	if len(profile) > 255 || strings.ContainsAny(profile, junkProfileChars) || profile == "." || profile == ".." {
+		return false
+	}
+	for _, c := range profile {
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 // Dir returns "<data>/comms/<profile>", the ledger directory for a profile.
 // The profile is validated as a single local path element.
 func Dir(profile string) (string, error) {
 	if profile == "" {
 		profile = "default"
 	}
-	if !filepath.IsLocal(profile) || filepath.Base(profile) != profile {
+	if !validProfileName(profile) || !filepath.IsLocal(profile) || filepath.Base(profile) != profile {
 		return "", fmt.Errorf("comms: invalid profile %q", profile)
 	}
 	root, err := agentpaths.EffectiveDataPath(ledgerDirName, ledgerDirName)
@@ -72,8 +92,12 @@ type Ledger struct {
 	seq    map[string]int64
 	last   map[string]Record // newest turn record per From (the tier rule's "previous turn")
 	status map[string]Record // newest status record per From
-	store  StoreIdentity
-	closed bool
+	flags  map[string]PendingFlag
+	// consumers caches the recipients whose state is known to exist.
+	consumers map[string]bool
+	dir       string
+	store     StoreIdentity
+	closed    bool
 }
 
 // StoreIdentity names one ledger across host renames and restores: a
@@ -90,6 +114,10 @@ type StoreIdentity struct {
 	// restored from an older copy: the epoch is bumped so consumer states
 	// from before the restore are recognised as stale.
 	HWM uint64 `json:"hwm,omitempty"`
+	// EpochStart is the ledger cursor at which the current epoch began (0
+	// for epoch 1): records at or below it came back from the restored copy,
+	// and a consumer rebuilt for the new epoch starts after them.
+	EpochStart uint64 `json:"epoch_start,omitempty"`
 }
 
 const hwmEvery = 256
@@ -174,7 +202,10 @@ func OpenDir(profile, dir string) (*Ledger, error) {
 		return nil, err
 	}
 	bus, err := events.OpenAt(dir, events.Options{RetentionDays: DefaultRetentionDays, RetainSegments: retainSegments,
-		Private: true, KeepCorrupt: true, MaxBytes: DefaultMaxBytes})
+		Private: true, KeepCorrupt: true, MaxBytes: DefaultMaxBytes,
+		// Pending-delivery retention: a segment a consumer that read
+		// recently has not acknowledged is never compacted.
+		RetainFrom: func() events.Cursor { return ConsumersRetainFrom(dir, time.Now()) }})
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +219,7 @@ func OpenDir(profile, dir string) (*Ledger, error) {
 		// older copy. New epoch, so stale consumer states are rejected.
 		store.Epoch++
 		store.HWM = cursor
+		store.EpochStart = cursor
 		if err := writeStoreIdentity(dir, store); err != nil {
 			_ = bus.Close()
 			return nil, err
@@ -195,7 +227,7 @@ func OpenDir(profile, dir string) (*Ledger, error) {
 		slog.Warn("comms_store_restored", "dir", dir, "epoch", store.Epoch, "cursor", cursor)
 	}
 	l := &Ledger{profile: profile, bus: bus, keys: map[string]Record{}, seq: map[string]int64{},
-		last: map[string]Record{}, status: map[string]Record{}, store: store}
+		last: map[string]Record{}, status: map[string]Record{}, flags: map[string]PendingFlag{}, consumers: map[string]bool{}, dir: dir, store: store}
 	if err := l.warm(); err != nil {
 		_ = bus.Close()
 		return nil, err
@@ -232,10 +264,14 @@ func (l *Ledger) warm() error {
 			return err
 		}
 		reached := events.Cursor(0)
+		seen := map[string]PendingFlag{}
 		for f := range sub.Frames() {
 			var r Record
 			if json.Unmarshal(f.Data, &r) == nil {
 				l.remember(r)
+				for _, to := range recipients(r) {
+					seen[to] = PendingFlag{Last: f.Cursor}
+				}
 			}
 			reached = f.Cursor
 			if f.Cursor >= last {
@@ -244,6 +280,7 @@ func (l *Ledger) warm() error {
 		}
 		cancel()
 		if reached >= last {
+			l.repairFlags(seen)
 			return nil
 		}
 		if errors.Is(sub.Err(), events.ErrCursorTooOld) && after != 0 {
@@ -276,6 +313,77 @@ func (l *Ledger) remember(r Record) {
 		l.last[r.From] = r
 	case KindStatus:
 		l.status[r.From] = r
+	}
+}
+
+// recipients lists the consumers a record is news for (Deliverable), each
+// a valid consumer name.
+func recipients(r Record) []string {
+	var out []string
+	for _, to := range r.To {
+		if ValidConsumer(to) == nil && Deliverable(r, to) {
+			out = append(out, to)
+		}
+	}
+	return out
+}
+
+// raiseFlags runs before a record addressed to consumers becomes visible:
+// a recipient seen for the first time gets its consumer state just before
+// this record (so it reads from here, whoever reads first), and every
+// recipient's pending flag moves to cursor. If the state cannot be written
+// the consumer's first read starts at the end and records the loss as a
+// state_lost gap (the flag says something was addressed to it).
+func (l *Ledger) raiseFlags(r Record, cursor events.Cursor) {
+	for _, to := range recipients(r) {
+		if !l.consumers[to] {
+			if err := EnsureConsumer(l.dir, to, l.store, cursor-1); err != nil {
+				slog.Warn("comms_consumer_create_failed", "consumer", to, "error", err.Error())
+			} else {
+				l.consumers[to] = true
+			}
+		}
+		fl := l.flags[to]
+		if fl.Epoch != l.store.Epoch {
+			fl = PendingFlag{}
+		}
+		fl.Last, fl.Epoch = max(fl.Last, cursor), l.store.Epoch
+		l.flags[to] = fl
+		_ = writeFlag(l.dir, to, fl)
+	}
+}
+
+// repairFlags rebuilds pending flags from the dedup window at open, so a
+// flag lost between a crash and its rewrite is seen again. Only Last is a
+// flag's business; a flag already newer is kept.
+func (l *Ledger) repairFlags(seen map[string]PendingFlag) {
+	end := l.bus.Cursor()
+	for to, w := range seen {
+		fl, ok := ReadFlag(l.dir, to)
+		// A recipient with no state and no flag dates from a ledger written
+		// before consumer states existed (a P1 daemon wrote neither): it
+		// starts at the end of the log as of this open, since the inbox
+		// delivered what came before, and its first read is not a false
+		// state_lost. A recipient with a flag but no state lost its state:
+		// left missing, so its first read reports the gap.
+		if !ok {
+			// No flag of any epoch: a P1 daemon (it wrote no flags) addressed
+			// this recipient. A flag of an older epoch is a P2 recipient (a
+			// restore bumped the epoch): its lost state stays a gap.
+			if _, err := os.Stat(ConsumerPath(l.dir, to)); errors.Is(err, os.ErrNotExist) {
+				if err := EnsureConsumer(l.dir, to, l.store, end); err != nil {
+					continue // no flag either, so the next open retries
+				}
+				l.consumers[to] = true
+			}
+		}
+		if ok && fl.Epoch == l.store.Epoch && fl.Last >= w.Last {
+			l.flags[to] = fl
+			continue
+		}
+		fl = PendingFlag{Last: w.Last, Epoch: l.store.Epoch}
+		l.flags[to] = fl
+		_ = writeFlag(l.dir, to, fl)
 	}
 }
 
@@ -376,11 +484,20 @@ func (l *Ledger) Commit(r Record) (Record, events.Cursor, error) {
 		r.Seq = l.seq[r.From] + 1 // an imported record keeps the origin's sequence
 	}
 	r.Stamp(time.Now())
+	// Raise the recipients' pending flags BEFORE the frame becomes
+	// visible: a reader that sees the record always finds a flag at or
+	// above it (an early flag for a commit that then fails costs a reader
+	// one scan, never a record).
+	predicted := l.bus.Cursor() + 1
+	l.raiseFlags(r, predicted)
 	f, err := l.bus.Commit(r.Kind, r.From, r)
 	if err != nil {
 		return r, 0, err
 	}
 	l.remember(r)
+	if f.Cursor != predicted {
+		l.raiseFlags(r, f.Cursor)
+	}
 	if uint64(f.Cursor)%hwmEvery == 0 {
 		l.persistHWM(uint64(f.Cursor))
 	}
