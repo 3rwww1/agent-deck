@@ -38,6 +38,27 @@ const (
 // DefaultRetryBudget is how long a send may wait for a busy target.
 const DefaultRetryBudget = 30 * time.Minute
 
+// DefaultRetryBackoffMax caps the wait between two attempts of a send
+// refused before typing (composer_blocked, target_busy). The wait doubles
+// from the worker poll up to this cap, so a composer held by a human typing
+// is retried a few times a minute at first and then once a minute until the
+// retry budget ends, not every second (issue #2481: 19 and 15 attempts
+// within five minutes measured).
+const DefaultRetryBackoffMax = time.Minute
+
+// RetryDelay is the wait before the next attempt of a send that has been
+// refused attempts times: base doubled per refusal, capped at max.
+func RetryDelay(base, max time.Duration, attempts int) time.Duration {
+	d := base
+	for i := 1; i < attempts && d < max; i++ {
+		d *= 2
+	}
+	if d > max {
+		return max
+	}
+	return d
+}
+
 // RetainFinished is how long finished records stay readable by send-status.
 const RetainFinished = 7 * 24 * time.Hour
 
@@ -58,6 +79,9 @@ type Record struct {
 	Deadline     string   `json:"deadline"`
 	Attempts     int      `json:"attempts"`
 	SentAt       string   `json:"sent_at,omitempty"`
+	// Sender is who queued the send: the calling session's id, or "cli".
+	// The delivering child journals it as the send's sender.
+	Sender string `json:"sender,omitempty"`
 	// ChildPID is the `session send` process delivering a typing record;
 	// its result lands in ResultPath(dir, send_id).
 	ChildPID       int    `json:"child_pid,omitempty"`
