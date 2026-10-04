@@ -2929,6 +2929,7 @@ type openCodeSessionMetadata struct {
 
 type openCodeHTTPSessionMetadata struct {
 	ID        string `json:"id"`
+	ParentID  string `json:"parentID"`
 	Directory string `json:"directory"`
 	Path      string `json:"path"`
 	Location  struct {
@@ -2939,6 +2940,30 @@ type openCodeHTTPSessionMetadata struct {
 		Updated int64 `json:"updated"`
 	} `json:"time"`
 }
+
+func (s openCodeHTTPSessionMetadata) flatten() openCodeSessionMetadata {
+	directory := s.Directory
+	if directory == "" {
+		directory = s.Location.Directory
+	}
+	return openCodeSessionMetadata{
+		ID:        s.ID,
+		Directory: directory,
+		Path:      s.Path,
+		Created:   s.Time.Created,
+		Updated:   s.Time.Updated,
+	}
+}
+
+// openCodeServiceSessionPage is one page of `opencode api session.list` on
+// 2.x, where sessions live in the shared background service.
+type openCodeServiceSessionPage struct {
+	Data []openCodeHTTPSessionMetadata `json:"data"`
+}
+
+// The service pages at 50 by default and the directory filter still returns
+// every sub-agent session, so one page can miss the root the TUI is in.
+const openCodeServiceSessionPageSize = 200
 
 type openCodeCLIQueryCacheEntry struct {
 	queriedAt time.Time
@@ -3108,17 +3133,7 @@ func (i *Instance) queryOpenCodeSessionsHTTP(port int, projectPath string) ([]op
 
 	sessions := make([]openCodeSessionMetadata, 0, len(payload))
 	for _, session := range payload {
-		directory := session.Directory
-		if directory == "" {
-			directory = session.Location.Directory
-		}
-		sessions = append(sessions, openCodeSessionMetadata{
-			ID:        session.ID,
-			Directory: directory,
-			Path:      session.Path,
-			Created:   session.Time.Created,
-			Updated:   session.Time.Updated,
-		})
+		sessions = append(sessions, session.flatten())
 	}
 	return sessions, nil
 }
@@ -3173,12 +3188,23 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath string) []openCodeSessionM
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Run: opencode session list --format json
-	cmd := exec.CommandContext(ctx, "opencode", "session", "list", "--format", "json")
+	// On 2.x `session list` prints [] for a directory: the sessions live in the
+	// shared background service and `opencode api` is the CLI's door to it.
+	v2 := i.openCodeRejectsV1LaunchFlags()
+	args := []string{"session", "list", "--format", "json"}
+	if v2 {
+		args = []string{"api", "session.list",
+			"--param", "directory=" + projectPath,
+			"--param", "limit=" + strconv.Itoa(openCodeServiceSessionPageSize)}
+	}
+	cmd := exec.CommandContext(ctx, "opencode", args...)
 	cmd.Dir = projectPath
 	cmd.WaitDelay = 500 * time.Millisecond
 
-	sessionLog.Debug("opencode_query_sessions", slog.String("dir", logging.SanitizeValue(projectPath)))
+	sessionLog.Debug("opencode_query_sessions",
+		slog.String("dir", logging.SanitizeValue(projectPath)),
+		slog.Bool("service_api", v2),
+	)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -3195,6 +3221,10 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath string) []openCodeSessionM
 
 	sessionLog.Debug("opencode_session_data_size", slog.Int("bytes", len(output)))
 
+	if v2 {
+		return parseOpenCodeServiceSessionPage(output)
+	}
+
 	// Parse JSON response
 	// Expected format: array of session objects with id, directory, created, updated fields
 	var sessions []openCodeSessionMetadata
@@ -3202,6 +3232,25 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath string) []openCodeSessionM
 	if err := json.Unmarshal(output, &sessions); err != nil {
 		sessionLog.Debug("opencode_parse_failed", slog.String("error", err.Error()))
 		return nil
+	}
+	return sessions
+}
+
+// parseOpenCodeServiceSessionPage keeps root sessions only: a sub-agent
+// session shares the directory and is updated more recently than the TUI's
+// own, so it would win the best-match rotation and rebind the instance.
+func parseOpenCodeServiceSessionPage(output []byte) []openCodeSessionMetadata {
+	var page openCodeServiceSessionPage
+	if err := json.Unmarshal(output, &page); err != nil {
+		sessionLog.Debug("opencode_parse_failed", slog.String("error", err.Error()))
+		return nil
+	}
+	sessions := make([]openCodeSessionMetadata, 0, len(page.Data))
+	for _, session := range page.Data {
+		if session.ParentID != "" {
+			continue
+		}
+		sessions = append(sessions, session.flatten())
 	}
 	return sessions
 }

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -230,5 +231,57 @@ func TestQueryOpenCodeSession_NoManagedPortCoalescesConcurrentCLIFallback(t *tes
 	}
 	if got := len(invocations); got != 1 {
 		t.Fatalf("concurrent CLI invocation count = %d, want 1", got)
+	}
+}
+
+func TestQueryOpenCodeSession_V2QueriesSharedServiceAndSkipsChildren(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	payload := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_ROOT","parentID":null,"location":{"directory":%q},"time":{"created":1000,"updated":2000}},`+
+		`{"id":"ses_CHILD","parentID":"ses_ROOT","location":{"directory":%q},"time":{"created":3000,"updated":4000}},`+
+		`{"id":"ses_OTHER","location":{"directory":"/another/project"},"time":{"created":5000,"updated":6000}}`+
+		`],"cursor":{"previous":null,"next":null}}`, projectPath, projectPath)
+
+	argv := filepath.Join(t.TempDir(), "argv")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nprintf '%%s\\n' %q\n", argv, payload)
+	setFakeOpenCodePath(t, script, false)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath}
+	if got := inst.queryOpenCodeSession(); got != "ses_ROOT" {
+		t.Fatalf("session ID = %q, want ses_ROOT", got)
+	}
+
+	gotArgv, err := os.ReadFile(argv)
+	if err != nil {
+		t.Fatalf("read argv marker: %v", err)
+	}
+	want := "api\nsession.list\n--param\ndirectory=" + projectPath + "\n--param\nlimit=" +
+		strconv.Itoa(openCodeServiceSessionPageSize) + "\n"
+	if string(gotArgv) != want {
+		t.Fatalf("opencode argv =\n%s\nwant\n%s", gotArgv, want)
+	}
+}
+
+func TestQueryOpenCodeSession_V1KeepsSessionListCommand(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 1, true)
+	projectPath := t.TempDir()
+	payload := fmt.Sprintf(`[{"id":"ses_V1","directory":%q,"created":1000,"updated":2000}]`, projectPath)
+
+	argv := filepath.Join(t.TempDir(), "argv")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nprintf '%%s\\n' %q\n", argv, payload)
+	setFakeOpenCodePath(t, script, false)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath}
+	if got := inst.queryOpenCodeSession(); got != "ses_V1" {
+		t.Fatalf("session ID = %q, want ses_V1", got)
+	}
+
+	gotArgv, err := os.ReadFile(argv)
+	if err != nil {
+		t.Fatalf("read argv marker: %v", err)
+	}
+	if want := "session\nlist\n--format\njson\n"; string(gotArgv) != want {
+		t.Fatalf("opencode argv =\n%s\nwant\n%s", gotArgv, want)
 	}
 }
