@@ -11504,6 +11504,9 @@ func (i *Instance) forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath strin
 		if err != nil {
 			return "", "", err
 		}
+		if err := applyOpenCodeForkOverridesViaService(childID, workDir, opts); err != nil {
+			return "", "", err
+		}
 		return fmt.Sprintf("cd %s && opencode -s %s", shellescape.Quote(workDir), childID), childID, nil
 	}
 
@@ -11530,24 +11533,11 @@ func (i *Instance) forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath strin
 // service, where `--fork` no longer exists, and returns the new session id.
 // The child is a root session in the same directory, so the forked instance
 // resumes it with a plain `-s` and a later restart does the same. The 1.x
-// -m/--agent fork flags are not emitted: 2.x exits on them and picks the model
-// and agent inside the TUI.
+// -m/--agent fork flags are not emitted: 2.x exits on them, so model and agent
+// overrides are applied to the child session by applyOpenCodeForkOverridesViaService.
 func (i *Instance) forkOpenCodeSessionViaService(parentID, workDir string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// #nosec G204 -- "opencode" is a fixed binary and parentID passed
-	// CanForkOpenCode's shell-safe identifier check.
-	cmd := exec.CommandContext(ctx, "opencode", "api", "session.fork",
-		"--param", "sessionID="+parentID, "-d", "{}")
-	cmd.Dir = workDir
-	cmd.WaitDelay = 500 * time.Millisecond
-	output, err := cmd.Output()
+	output, err := runOpenCodeServiceCall(workDir, "session.fork", parentID, "{}")
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			return "", fmt.Errorf("opencode fork via service failed: %s", strings.TrimSpace(string(exitErr.Stderr)))
-		}
 		return "", fmt.Errorf("opencode fork via service failed: %w", err)
 	}
 
@@ -11569,6 +11559,64 @@ func (i *Instance) forkOpenCodeSessionViaService(parentID, workDir string) (stri
 		slog.String("parent_session_id", parentID),
 		slog.String("child_session_id", childID))
 	return childID, nil
+}
+
+// applyOpenCodeForkOverridesViaService sets the fork's model and agent
+// overrides on the 2.x child session. The service stores both on the session,
+// so the first launch and every later `-s` resume pick them up.
+func applyOpenCodeForkOverridesViaService(childID, workDir string, opts *OpenCodeOptions) error {
+	if opts == nil {
+		return nil
+	}
+	if opts.Model != "" {
+		providerID, modelID, ok := strings.Cut(opts.Model, "/")
+		if !ok || providerID == "" || modelID == "" {
+			return fmt.Errorf("opencode fork: model %q is not in provider/model form", opts.Model)
+		}
+		body, err := json.Marshal(map[string]any{
+			"model": map[string]string{"providerID": providerID, "id": modelID},
+		})
+		if err != nil {
+			return fmt.Errorf("opencode fork: encode model override: %w", err)
+		}
+		if _, err := runOpenCodeServiceCall(workDir, "session.switchModel", childID, string(body)); err != nil {
+			return fmt.Errorf("opencode fork: set model on child session %s: %w", childID, err)
+		}
+	}
+	if opts.Agent != "" {
+		body, err := json.Marshal(map[string]string{"agent": opts.Agent})
+		if err != nil {
+			return fmt.Errorf("opencode fork: encode agent override: %w", err)
+		}
+		if _, err := runOpenCodeServiceCall(workDir, "session.switchAgent", childID, string(body)); err != nil {
+			return fmt.Errorf("opencode fork: set agent on child session %s: %w", childID, err)
+		}
+	}
+	return nil
+}
+
+// runOpenCodeServiceCall runs one `opencode api <operation>` request against
+// the 2.x shared service for sessionID and returns its stdout.
+func runOpenCodeServiceCall(workDir, operation, sessionID, body string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// #nosec G204 -- "opencode" is a fixed binary, operation is a constant at
+	// every call site, sessionID passed a shell-safe identifier check, and the
+	// JSON body is passed as a single argv element.
+	cmd := exec.CommandContext(ctx, "opencode", "api", operation,
+		"--param", "sessionID="+sessionID, "-d", body)
+	cmd.Dir = workDir
+	cmd.WaitDelay = 500 * time.Millisecond
+	output, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return nil, errors.New(strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return nil, err
+	}
+	return output, nil
 }
 
 // CreateForkedOpenCodeInstance creates a new Instance configured for forking an OpenCode session
