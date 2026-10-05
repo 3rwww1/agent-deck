@@ -11500,11 +11500,19 @@ func (i *Instance) forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath strin
 	}
 
 	if i.openCodeRejectsV1LaunchFlags() {
+		if opts != nil && opts.Model != "" {
+			if _, err := openCodeModelRef(opts.Model); err != nil {
+				return "", "", err
+			}
+		}
 		childID, err := i.forkOpenCodeSessionViaService(i.OpenCodeSessionID, workDir)
 		if err != nil {
 			return "", "", err
 		}
 		if err := applyOpenCodeForkOverridesViaService(childID, workDir, opts); err != nil {
+			if _, rmErr := runOpenCodeServiceCall(workDir, "session.remove", childID, ""); rmErr != nil {
+				return "", "", fmt.Errorf("%w (remove child session %s: %v)", err, childID, rmErr)
+			}
 			return "", "", err
 		}
 		return fmt.Sprintf("cd %s && opencode -s %s", shellescape.Quote(workDir), childID), childID, nil
@@ -11569,13 +11577,11 @@ func applyOpenCodeForkOverridesViaService(childID, workDir string, opts *OpenCod
 		return nil
 	}
 	if opts.Model != "" {
-		providerID, modelID, ok := strings.Cut(opts.Model, "/")
-		if !ok || providerID == "" || modelID == "" {
-			return fmt.Errorf("opencode fork: model %q is not in provider/model form", opts.Model)
+		ref, err := openCodeModelRef(opts.Model)
+		if err != nil {
+			return err
 		}
-		body, err := json.Marshal(map[string]any{
-			"model": map[string]string{"providerID": providerID, "id": modelID},
-		})
+		body, err := json.Marshal(map[string]any{"model": ref})
 		if err != nil {
 			return fmt.Errorf("opencode fork: encode model override: %w", err)
 		}
@@ -11595,8 +11601,19 @@ func applyOpenCodeForkOverridesViaService(childID, workDir string, opts *OpenCod
 	return nil
 }
 
+// openCodeModelRef splits a provider/model string into the 2.x service's
+// model reference.
+func openCodeModelRef(model string) (map[string]string, error) {
+	providerID, modelID, ok := strings.Cut(model, "/")
+	if !ok || providerID == "" || modelID == "" {
+		return nil, fmt.Errorf("opencode fork: model %q is not in provider/model form", model)
+	}
+	return map[string]string{"providerID": providerID, "id": modelID}, nil
+}
+
 // runOpenCodeServiceCall runs one `opencode api <operation>` request against
-// the 2.x shared service for sessionID and returns its stdout.
+// the 2.x shared service for sessionID and returns its stdout. An empty body
+// sends no request body.
 func runOpenCodeServiceCall(workDir, operation, sessionID, body string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -11604,8 +11621,11 @@ func runOpenCodeServiceCall(workDir, operation, sessionID, body string) ([]byte,
 	// #nosec G204 -- "opencode" is a fixed binary, operation is a constant at
 	// every call site, sessionID passed a shell-safe identifier check, and the
 	// JSON body is passed as a single argv element.
-	cmd := exec.CommandContext(ctx, "opencode", "api", operation,
-		"--param", "sessionID="+sessionID, "-d", body)
+	args := []string{"api", operation, "--param", "sessionID=" + sessionID}
+	if body != "" {
+		args = append(args, "-d", body)
+	}
+	cmd := exec.CommandContext(ctx, "opencode", args...)
 	cmd.Dir = workDir
 	cmd.WaitDelay = 500 * time.Millisecond
 	output, err := cmd.Output()

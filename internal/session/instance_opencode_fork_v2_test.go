@@ -1,9 +1,11 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,13 +18,13 @@ func fakeOpenCodeForkService(t *testing.T, childID string, exitCode int) string 
 }
 
 // fakeOpenCodeService stubs `opencode api`: session.fork replies with childID
-// and exits forkExit, every other operation exits switchExit. Each call's argv
-// is appended to the returned file.
+// and exits forkExit, session.remove exits 0, every other operation exits
+// switchExit. Each call's argv is appended to the returned file.
 func fakeOpenCodeService(t *testing.T, childID string, forkExit, switchExit int) string {
 	t.Helper()
 	argv := filepath.Join(t.TempDir(), "argv")
 	reply := fmt.Sprintf(`{"data":{"id":%q,"location":{"directory":"/p"},"time":{"created":1,"updated":2}}}`, childID)
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" >> %q\nif [ \"$2\" = session.fork ]; then printf '%%s\\n' %q; exit %d; fi\nexit %d\n",
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" >> %q\nif [ \"$2\" = session.fork ]; then printf '%%s\\n' %q; exit %d; fi\nif [ \"$2\" = session.remove ]; then exit 0; fi\nexit %d\n",
 		argv, reply, forkExit, switchExit)
 	setFakeOpenCodePath(t, script, false)
 	return argv
@@ -114,7 +116,7 @@ func TestOpenCodeForkV2_NoOverridesForksOnly(t *testing.T) {
 
 func TestOpenCodeForkV2_OverrideFailureIsAnError(t *testing.T) {
 	pinOpenCodeMajorVersion(t, 2, true)
-	fakeOpenCodeService(t, "ses_child_456", 0, 1)
+	argv := fakeOpenCodeService(t, "ses_child_456", 0, 1)
 
 	parent := NewInstanceWithTool("oc", t.TempDir(), "opencode")
 	parent.OpenCodeSessionID = "ses_parent_123"
@@ -123,11 +125,18 @@ func TestOpenCodeForkV2_OverrideFailureIsAnError(t *testing.T) {
 	if _, _, err := parent.CreateForkedOpenCodeInstanceWithOptions("oc fork", "", &OpenCodeOptions{Agent: "build"}); err == nil {
 		t.Fatal("expected an error when the child agent cannot be applied, got nil")
 	}
+	gotArgv, err := os.ReadFile(argv)
+	if err != nil {
+		t.Fatalf("read argv marker: %v", err)
+	}
+	if want := "api\nsession.remove\n--param\nsessionID=ses_child_456\n"; !strings.HasSuffix(string(gotArgv), want) {
+		t.Fatalf("a child left without its overrides must be removed; opencode argv =\n%s", gotArgv)
+	}
 }
 
 func TestOpenCodeForkV2_RejectsModelWithoutProvider(t *testing.T) {
 	pinOpenCodeMajorVersion(t, 2, true)
-	fakeOpenCodeForkService(t, "ses_child_456", 0)
+	argv := fakeOpenCodeForkService(t, "ses_child_456", 0)
 
 	parent := NewInstanceWithTool("oc", t.TempDir(), "opencode")
 	parent.OpenCodeSessionID = "ses_parent_123"
@@ -135,5 +144,34 @@ func TestOpenCodeForkV2_RejectsModelWithoutProvider(t *testing.T) {
 
 	if _, err := parent.ForkOpenCodeWithOptions("oc fork", "", &OpenCodeOptions{Model: "claude"}); err == nil {
 		t.Fatal("expected an error for a model without a provider prefix, got nil")
+	}
+	if gotArgv, err := os.ReadFile(argv); err == nil {
+		t.Fatalf("an invalid model must be rejected before any service call; opencode argv =\n%s", gotArgv)
+	}
+}
+
+func TestOpenCodeForkV2_ChildIDSurvivesReloadAndRestart(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	fakeOpenCodeForkService(t, "ses_child_456", 0)
+
+	parent := NewInstanceWithTool("oc", t.TempDir(), "opencode")
+	parent.OpenCodeSessionID = "ses_parent_123"
+	parent.OpenCodeDetectedAt = time.Now()
+
+	forked, _, err := parent.CreateForkedOpenCodeInstanceWithOptions("oc fork", "", &OpenCodeOptions{Model: "anthropic/claude", Agent: "build"})
+	if err != nil {
+		t.Fatalf("CreateForkedOpenCodeInstanceWithOptions: %v", err)
+	}
+	encoded, err := json.Marshal(forked)
+	if err != nil {
+		t.Fatalf("marshal forked instance: %v", err)
+	}
+	reloaded := &Instance{}
+	if err := json.Unmarshal(encoded, reloaded); err != nil {
+		t.Fatalf("unmarshal forked instance: %v", err)
+	}
+
+	if got, want := reloaded.buildOpenCodeCommand(reloaded.Command), "opencode -s ses_child_456"; !strings.HasSuffix(got, want) {
+		t.Fatalf("restart command after reload = %q, want suffix %q (child id, no 1.x flags)", got, want)
 	}
 }
