@@ -19,15 +19,55 @@ func fakeOpenCodeForkService(t *testing.T, childID string, exitCode int) string 
 
 // fakeOpenCodeService stubs `opencode api`: session.fork replies with childID
 // and exits forkExit, session.remove exits 0, every other operation exits
-// switchExit. Each call's argv is appended to the returned file.
+// switchExit. Each call's argv is appended to the returned file. The stub is
+// both on PATH and the configured [opencode].command, under a fresh HOME.
 func fakeOpenCodeService(t *testing.T, childID string, forkExit, switchExit int) string {
 	t.Helper()
 	argv := filepath.Join(t.TempDir(), "argv")
-	reply := fmt.Sprintf(`{"data":{"id":%q,"location":{"directory":"/p"},"time":{"created":1,"updated":2}}}`, childID)
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" >> %q\nif [ \"$2\" = session.fork ]; then printf '%%s\\n' %q; exit %d; fi\nif [ \"$2\" = session.remove ]; then exit 0; fi\nexit %d\n",
-		argv, reply, forkExit, switchExit)
-	setFakeOpenCodePath(t, script, false)
+	setFakeOpenCodePath(t, fakeOpenCodeServiceScript(argv, childID, forkExit, switchExit), false)
+	configureFakeOpenCode(t)
 	return argv
+}
+
+func fakeOpenCodeServiceScript(argv, childID string, forkExit, switchExit int) string {
+	reply := fmt.Sprintf(`{"data":{"id":%q,"location":{"directory":"/p"},"time":{"created":1,"updated":2}}}`, childID)
+	return fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" >> %q\nif [ \"$2\" = session.fork ]; then printf '%%s\\n' %q; exit %d; fi\nif [ \"$2\" = session.remove ]; then exit 0; fi\nexit %d\n",
+		argv, reply, forkExit, switchExit)
+}
+
+// The 2.x service calls run the configured binary, as discovery does: with
+// the stub reachable only through [opencode].command, a bare `opencode` on
+// this PATH does not exist, so the fork proves the resolved path is used.
+func TestOpenCodeForkV2_UsesConfiguredBinary(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	argv := filepath.Join(t.TempDir(), "argv")
+	stubDir := t.TempDir()
+	stub := filepath.Join(stubDir, "opencode")
+	if err := os.WriteFile(stub, []byte(fakeOpenCodeServiceScript(argv, "ses_child_456", 0, 0)), 0o755); err != nil {
+		t.Fatalf("write fake opencode: %v", err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	isolateOpenCodeConfig(t, stub)
+
+	workDir := t.TempDir()
+	parent := NewInstanceWithTool("oc", workDir, "opencode")
+	parent.OpenCodeSessionID = "ses_parent_123"
+	parent.OpenCodeDetectedAt = time.Now()
+
+	_, cmd, err := parent.CreateForkedOpenCodeInstanceWithOptions("oc fork", "", nil)
+	if err != nil {
+		t.Fatalf("CreateForkedOpenCodeInstanceWithOptions: %v", err)
+	}
+	if want := "cd " + shellescape.Quote(workDir) + " && opencode -s ses_child_456"; cmd != want {
+		t.Fatalf("fork command = %q, want %q", cmd, want)
+	}
+	gotArgv, err := os.ReadFile(argv)
+	if err != nil {
+		t.Fatalf("configured binary was not run: %v", err)
+	}
+	if want := "api\nsession.fork\n--param\nsessionID=ses_parent_123\n-d\n{}\n"; string(gotArgv) != want {
+		t.Fatalf("opencode argv =\n%s\nwant\n%s", gotArgv, want)
+	}
 }
 
 func TestOpenCodeForkV2_ForksThroughServiceAndResumesChild(t *testing.T) {
@@ -177,27 +217,26 @@ func TestOpenCodeForkV2_ChildIDSurvivesReloadAndRestart(t *testing.T) {
 }
 
 func TestOpenCodeForkV2_NilOptionsApplyConfigDefaults(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	argv := fakeOpenCodeForkService(t, "ses_child_456", 0)
+
+	// fakeOpenCodeForkService wrote [opencode].command into a fresh HOME; the
+	// defaults join that same table.
 	configPath, err := GetUserConfigPath()
 	if err != nil {
 		t.Fatalf("GetUserConfigPath: %v", err)
 	}
-	if _, statErr := os.Stat(configPath); statErr == nil {
-		t.Fatalf("sandboxed config %s already exists; refusing to clobber", configPath)
+	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open config: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		t.Fatalf("mkdir config dir: %v", err)
-	}
-	if err := os.WriteFile(configPath, []byte("[opencode]\ndefault_model = \"anthropic/claude\"\ndefault_agent = \"build\"\n"), 0o600); err != nil {
+	if _, err := f.WriteString("default_model = \"anthropic/claude\"\ndefault_agent = \"build\"\n"); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close config: %v", err)
+	}
 	ClearUserConfigCache()
-	t.Cleanup(func() {
-		os.Remove(configPath)
-		ClearUserConfigCache()
-	})
-
-	pinOpenCodeMajorVersion(t, 2, true)
-	argv := fakeOpenCodeForkService(t, "ses_child_456", 0)
 
 	parent := NewInstanceWithTool("oc", t.TempDir(), "opencode")
 	parent.OpenCodeSessionID = "ses_parent_123"

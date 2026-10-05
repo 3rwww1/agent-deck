@@ -11511,12 +11511,17 @@ func (i *Instance) forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath strin
 				return "", "", err
 			}
 		}
-		childID, err := i.forkOpenCodeSessionViaService(i.OpenCodeSessionID, workDir)
+		// The 2.x verdict came from the configured binary, which a bare name may not reach.
+		binary, ok := i.openCodeLaunchBinary()
+		if !ok {
+			return "", "", fmt.Errorf("opencode fork: cannot resolve the configured opencode binary")
+		}
+		childID, err := i.forkOpenCodeSessionViaService(binary, i.OpenCodeSessionID, workDir)
 		if err != nil {
 			return "", "", err
 		}
-		if err := applyOpenCodeForkOverridesViaService(childID, workDir, serviceOpts); err != nil {
-			if _, rmErr := runOpenCodeServiceCall(workDir, "session.remove", childID, ""); rmErr != nil {
+		if err := applyOpenCodeForkOverridesViaService(binary, childID, workDir, serviceOpts); err != nil {
+			if _, rmErr := runOpenCodeServiceCall(binary, workDir, "session.remove", childID, ""); rmErr != nil {
 				return "", "", fmt.Errorf("%w (remove child session %s: %v)", err, childID, rmErr)
 			}
 			return "", "", err
@@ -11549,8 +11554,8 @@ func (i *Instance) forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath strin
 // resumes it with a plain `-s` and a later restart does the same. The 1.x
 // -m/--agent fork flags are not emitted: 2.x exits on them, so model and agent
 // overrides are applied to the child session by applyOpenCodeForkOverridesViaService.
-func (i *Instance) forkOpenCodeSessionViaService(parentID, workDir string) (string, error) {
-	output, err := runOpenCodeServiceCall(workDir, "session.fork", parentID, "{}")
+func (i *Instance) forkOpenCodeSessionViaService(binary, parentID, workDir string) (string, error) {
+	output, err := runOpenCodeServiceCall(binary, workDir, "session.fork", parentID, "{}")
 	if err != nil {
 		return "", fmt.Errorf("opencode fork via service failed: %w", err)
 	}
@@ -11578,7 +11583,7 @@ func (i *Instance) forkOpenCodeSessionViaService(parentID, workDir string) (stri
 // applyOpenCodeForkOverridesViaService sets the fork's model and agent
 // overrides on the 2.x child session. The service stores both on the session,
 // so the first launch and every later `-s` resume pick them up.
-func applyOpenCodeForkOverridesViaService(childID, workDir string, opts *OpenCodeOptions) error {
+func applyOpenCodeForkOverridesViaService(binary, childID, workDir string, opts *OpenCodeOptions) error {
 	if opts == nil {
 		return nil
 	}
@@ -11591,7 +11596,7 @@ func applyOpenCodeForkOverridesViaService(childID, workDir string, opts *OpenCod
 		if err != nil {
 			return fmt.Errorf("opencode fork: encode model override: %w", err)
 		}
-		if _, err := runOpenCodeServiceCall(workDir, "session.switchModel", childID, string(body)); err != nil {
+		if _, err := runOpenCodeServiceCall(binary, workDir, "session.switchModel", childID, string(body)); err != nil {
 			return fmt.Errorf("opencode fork: set model on child session %s: %w", childID, err)
 		}
 	}
@@ -11600,7 +11605,7 @@ func applyOpenCodeForkOverridesViaService(childID, workDir string, opts *OpenCod
 		if err != nil {
 			return fmt.Errorf("opencode fork: encode agent override: %w", err)
 		}
-		if _, err := runOpenCodeServiceCall(workDir, "session.switchAgent", childID, string(body)); err != nil {
+		if _, err := runOpenCodeServiceCall(binary, workDir, "session.switchAgent", childID, string(body)); err != nil {
 			return fmt.Errorf("opencode fork: set agent on child session %s: %w", childID, err)
 		}
 	}
@@ -11617,21 +11622,22 @@ func openCodeModelRef(model string) (map[string]string, error) {
 	return map[string]string{"providerID": providerID, "id": modelID}, nil
 }
 
-// runOpenCodeServiceCall runs one `opencode api <operation>` request against
-// the 2.x shared service for sessionID and returns its stdout. An empty body
-// sends no request body.
-func runOpenCodeServiceCall(workDir, operation, sessionID, body string) ([]byte, error) {
+// runOpenCodeServiceCall runs one `opencode api <operation>` request with the
+// resolved opencode binary against the 2.x shared service for sessionID and
+// returns its stdout. An empty body sends no request body.
+func runOpenCodeServiceCall(binary, workDir, operation, sessionID, body string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// #nosec G204 -- "opencode" is a fixed binary, operation is a constant at
-	// every call site, sessionID passed a shell-safe identifier check, and the
-	// JSON body is passed as a single argv element.
+	// #nosec G204 -- binary is the configured opencode resolved by
+	// openCodeLaunchBinary, operation is a constant at every call site,
+	// sessionID passed a shell-safe identifier check, and the JSON body is
+	// passed as a single argv element.
 	args := []string{"api", operation, "--param", "sessionID=" + sessionID}
 	if body != "" {
 		args = append(args, "-d", body)
 	}
-	cmd := exec.CommandContext(ctx, "opencode", args...)
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = workDir
 	cmd.WaitDelay = 500 * time.Millisecond
 	output, err := cmd.Output()
