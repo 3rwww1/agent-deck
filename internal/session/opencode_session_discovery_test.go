@@ -439,3 +439,40 @@ func TestQueryOpenCodeSession_V2RunsConfiguredBinary(t *testing.T) {
 		t.Fatalf("session ID = %q, want ses_CONFIGURED (discovery must run the configured binary)", got)
 	}
 }
+
+func TestQueryOpenCodeSession_V2UnboundIgnoresSiblingUpdatedAfterSpawn(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	startedAt := time.Now().UnixMilli()
+	// A sibling deck session keeps this conversation busy, so its updated time
+	// is newer than our spawn even though it was created long before it.
+	payload := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_SIBLING","location":{"directory":%q},"time":{"created":%d,"updated":%d}}`+
+		`],"cursor":{"previous":null,"next":null}}`, projectPath, startedAt-3_600_000, startedAt+60_000)
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", payload)
+	setFakeOpenCodePath(t, script, false)
+	configureFakeOpenCode(t)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: startedAt}
+	if got := inst.queryOpenCodeSession(); got != "" {
+		t.Fatalf("unbound 2.x instance adopted a sibling's conversation: %q", got)
+	}
+}
+
+func TestQueryOpenCodeSession_V2UnboundAdoptsSessionCreatedAfterSpawn(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	startedAt := time.Now().UnixMilli()
+	payload := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_SIBLING","location":{"directory":%q},"time":{"created":%d,"updated":%d}},`+
+		`{"id":"ses_MINE","location":{"directory":%q},"time":{"created":%d,"updated":%d}}`+
+		`],"cursor":{"previous":null,"next":null}}`, projectPath, startedAt-3_600_000, startedAt+120_000, projectPath, startedAt+1_000, startedAt+2_000)
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", payload)
+	setFakeOpenCodePath(t, script, false)
+	configureFakeOpenCode(t)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: startedAt}
+	if got := inst.queryOpenCodeSession(); got != "ses_MINE" {
+		t.Fatalf("session ID = %q, want ses_MINE", got)
+	}
+}

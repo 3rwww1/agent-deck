@@ -2984,7 +2984,11 @@ type openCodeCLIQueryCacheEntry struct {
 // rotate to a newer sibling when there was very recent local pane activity,
 // which approximates an intentional in-pane `/new` without stealing sessions
 // from other tabs in the same project.
-func findBestOpenCodeSession(sessions []openCodeSessionMetadata, projectPath, currentID string, startedAt, activityAt int64) string {
+// sharedService is the OpenCode 2.x case: every TUI on the host shares one
+// service, so the directory listing holds sibling conversations that other
+// deck sessions are driving. An unbound instance then adopts only a session
+// created after its own spawn; a sibling's fresh activity is not evidence.
+func findBestOpenCodeSession(sessions []openCodeSessionMetadata, projectPath, currentID string, startedAt, activityAt int64, sharedService bool) string {
 	normalizedProjectPath := normalizePath(projectPath)
 
 	var bestMatch string
@@ -3023,8 +3027,13 @@ func findBestOpenCodeSession(sessions []openCodeSessionMetadata, projectPath, cu
 			continue
 		}
 
-		if currentID == "" && startedAt > 0 && updatedAt < startupThreshold && sess.Created < startupThreshold {
-			continue
+		if currentID == "" && startedAt > 0 {
+			if sharedService && sess.Created < startupThreshold {
+				continue
+			}
+			if !sharedService && updatedAt < startupThreshold && sess.Created < startupThreshold {
+				continue
+			}
 		}
 
 		if currentID != "" && activityAt > 0 && (updatedAt >= activityThreshold || sess.Created >= activityThreshold) {
@@ -3098,7 +3107,8 @@ func (i *Instance) queryOpenCodeSession() string {
 		}
 	}
 
-	bestMatch := findBestOpenCodeSession(sessions, projectPath, currentID, startedAt, activityAt)
+	sharedService := port == 0 && i.openCodeRejectsV1LaunchFlags()
+	bestMatch := findBestOpenCodeSession(sessions, projectPath, currentID, startedAt, activityAt, sharedService)
 	sessionLog.Debug(
 		"opencode_best_match",
 		slog.String("session_id", bestMatch),
