@@ -175,3 +175,47 @@ func TestOpenCodeForkV2_ChildIDSurvivesReloadAndRestart(t *testing.T) {
 		t.Fatalf("restart command after reload = %q, want suffix %q (child id, no 1.x flags)", got, want)
 	}
 }
+
+func TestOpenCodeForkV2_NilOptionsApplyConfigDefaults(t *testing.T) {
+	configPath, err := GetUserConfigPath()
+	if err != nil {
+		t.Fatalf("GetUserConfigPath: %v", err)
+	}
+	if _, statErr := os.Stat(configPath); statErr == nil {
+		t.Fatalf("sandboxed config %s already exists; refusing to clobber", configPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("[opencode]\ndefault_model = \"anthropic/claude\"\ndefault_agent = \"build\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	ClearUserConfigCache()
+	t.Cleanup(func() {
+		os.Remove(configPath)
+		ClearUserConfigCache()
+	})
+
+	pinOpenCodeMajorVersion(t, 2, true)
+	argv := fakeOpenCodeForkService(t, "ses_child_456", 0)
+
+	parent := NewInstanceWithTool("oc", t.TempDir(), "opencode")
+	parent.OpenCodeSessionID = "ses_parent_123"
+	parent.OpenCodeDetectedAt = time.Now()
+
+	if _, err := parent.ForkOpenCodeWithOptions("oc fork", "", nil); err != nil {
+		t.Fatalf("ForkOpenCodeWithOptions: %v", err)
+	}
+	gotArgv, err := os.ReadFile(argv)
+	if err != nil {
+		t.Fatalf("read argv marker: %v", err)
+	}
+	for _, want := range []string{
+		"session.switchModel\n--param\nsessionID=ses_child_456\n-d\n" + `{"model":{"id":"claude","providerID":"anthropic"}}` + "\n",
+		"session.switchAgent\n--param\nsessionID=ses_child_456\n-d\n" + `{"agent":"build"}` + "\n",
+	} {
+		if !strings.Contains(string(gotArgv), want) {
+			t.Errorf("nil options must apply [opencode] defaults like the 1.x fork; missing %q in argv:\n%s", want, gotArgv)
+		}
+	}
+}

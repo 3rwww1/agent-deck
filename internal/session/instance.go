@@ -11500,8 +11500,14 @@ func (i *Instance) forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath strin
 	}
 
 	if i.openCodeRejectsV1LaunchFlags() {
-		if opts != nil && opts.Model != "" {
-			if _, err := openCodeModelRef(opts.Model); err != nil {
+		serviceOpts := opts
+		if serviceOpts == nil {
+			if config, err := LoadUserConfig(); err == nil && config != nil {
+				serviceOpts = NewOpenCodeOptions(config)
+			}
+		}
+		if serviceOpts != nil && serviceOpts.Model != "" {
+			if _, err := openCodeModelRef(serviceOpts.Model); err != nil {
 				return "", "", err
 			}
 		}
@@ -11509,7 +11515,7 @@ func (i *Instance) forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath strin
 		if err != nil {
 			return "", "", err
 		}
-		if err := applyOpenCodeForkOverridesViaService(childID, workDir, opts); err != nil {
+		if err := applyOpenCodeForkOverridesViaService(childID, workDir, serviceOpts); err != nil {
 			if _, rmErr := runOpenCodeServiceCall(workDir, "session.remove", childID, ""); rmErr != nil {
 				return "", "", fmt.Errorf("%w (remove child session %s: %v)", err, childID, rmErr)
 			}
