@@ -28,6 +28,10 @@ func setFakeOpenCodePath(t *testing.T, script string, includeSystemPath bool) {
 	t.Setenv("PATH", pathValue)
 }
 
+// fixtureSpawnedAt predates every fixture session, so the 2.x adoption guard
+// (created after spawn) admits them all.
+const fixtureSpawnedAt int64 = 1
+
 // configureFakeOpenCode points [opencode].command at the stub on PATH: 2.x
 // discovery resolves the configured binary with the spawn-path dirs first, so
 // a bare name could reach the host's real opencode.
@@ -261,7 +265,7 @@ func TestQueryOpenCodeSession_V2QueriesSharedServiceAndSkipsChildren(t *testing.
 	setFakeOpenCodePath(t, script, false)
 	configureFakeOpenCode(t)
 
-	inst := &Instance{Tool: "opencode", ProjectPath: projectPath}
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: fixtureSpawnedAt}
 	if got := inst.queryOpenCodeSession(); got != "ses_ROOT" {
 		t.Fatalf("session ID = %q, want ses_ROOT", got)
 	}
@@ -341,7 +345,7 @@ func TestQueryOpenCodeSession_V2FollowsCursorPastChildOnlyPage(t *testing.T) {
 		`],"cursor":{"previous":"p1","next":"c2"}}`, projectPath)
 	dir := setFakeOpenCodeServicePages(t, page1, page2)
 
-	inst := &Instance{Tool: "opencode", ProjectPath: projectPath}
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: fixtureSpawnedAt}
 	if got := inst.queryOpenCodeSession(); got != "ses_ROOT" {
 		t.Fatalf("session ID = %q, want ses_ROOT", got)
 	}
@@ -388,7 +392,7 @@ func TestQueryOpenCodeSession_V2BoundInstanceSkipsUnboundCachedPage(t *testing.T
 		`],"cursor":{"previous":"p1","next":null}}`, projectPath)
 	setFakeOpenCodeServicePages(t, page1, page2)
 
-	unbound := &Instance{Tool: "opencode", ProjectPath: projectPath}
+	unbound := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: fixtureSpawnedAt}
 	if got := unbound.queryOpenCodeSession(); got != "ses_NEWER" {
 		t.Fatalf("unbound session ID = %q, want ses_NEWER", got)
 	}
@@ -434,7 +438,7 @@ func TestQueryOpenCodeSession_V2RunsConfiguredBinary(t *testing.T) {
 	isolateOpenCodeConfig(t, "PATH="+commandDir+":$PATH opencode")
 	setFakeOpenCodePath(t, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", page("ses_PROCESS_PATH")), false)
 
-	inst := &Instance{Tool: "opencode", ProjectPath: projectPath}
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: fixtureSpawnedAt}
 	if got := inst.queryOpenCodeSession(); got != "ses_CONFIGURED" {
 		t.Fatalf("session ID = %q, want ses_CONFIGURED (discovery must run the configured binary)", got)
 	}
@@ -474,5 +478,61 @@ func TestQueryOpenCodeSession_V2UnboundAdoptsSessionCreatedAfterSpawn(t *testing
 	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: startedAt}
 	if got := inst.queryOpenCodeSession(); got != "ses_MINE" {
 		t.Fatalf("session ID = %q, want ses_MINE", got)
+	}
+}
+
+func TestQueryOpenCodeSession_V2RestoredUnboundUsesLastStartedAt(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	lastStarted := time.Now().Add(-time.Minute)
+	startedAt := lastStarted.UnixMilli()
+	payload := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_SIBLING","location":{"directory":%q},"time":{"created":%d,"updated":%d}},`+
+		`{"id":"ses_MINE","location":{"directory":%q},"time":{"created":%d,"updated":%d}}`+
+		`],"cursor":{"previous":null,"next":null}}`, projectPath, startedAt-3_600_000, startedAt+120_000, projectPath, startedAt+1_000, startedAt+2_000)
+	setFakeOpenCodePath(t, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", payload), false)
+	configureFakeOpenCode(t)
+
+	// OpenCodeStartedAt is not persisted, so a reloaded instance only has LastStartedAt.
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, LastStartedAt: lastStarted}
+	if got := inst.queryOpenCodeSession(); got != "ses_MINE" {
+		t.Fatalf("session ID = %q, want ses_MINE", got)
+	}
+}
+
+func TestQueryOpenCodeSession_V2UnboundWithoutStartTimeStaysUnbound(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	now := time.Now().UnixMilli()
+	payload := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_SIBLING","location":{"directory":%q},"time":{"created":%d,"updated":%d}}`+
+		`],"cursor":{"previous":null,"next":null}}`, projectPath, now-3_600_000, now)
+	setFakeOpenCodePath(t, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", payload), false)
+	configureFakeOpenCode(t)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath}
+	if got := inst.queryOpenCodeSession(); got != "" {
+		t.Fatalf("unbound 2.x instance with no start time adopted %q", got)
+	}
+}
+
+func TestQueryOpenCodeSession_V2UnboundPagesPastRootsCreatedBeforeSpawn(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	startedAt := time.Now().UnixMilli()
+	page1 := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_SIBLING","parentID":null,"location":{"directory":%q},"time":{"created":%d,"updated":%d}}`+
+		`],"cursor":{"previous":null,"next":"c1"}}`, projectPath, startedAt-3_600_000, startedAt+120_000)
+	page2 := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_MINE","parentID":null,"location":{"directory":%q},"time":{"created":%d,"updated":%d}}`+
+		`],"cursor":{"previous":"p1","next":null}}`, projectPath, startedAt+1_000, startedAt+2_000)
+	dir := setFakeOpenCodeServicePages(t, page1, page2)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: startedAt}
+	if got := inst.queryOpenCodeSession(); got != "ses_MINE" {
+		t.Fatalf("session ID = %q, want ses_MINE", got)
+	}
+	if got := fakeOpenCodeCallCount(t, dir); got != 2 {
+		t.Fatalf("opencode call count = %d, want 2 (page past roots created before spawn)", got)
 	}
 }

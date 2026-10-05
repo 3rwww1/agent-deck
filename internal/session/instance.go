@@ -2989,6 +2989,10 @@ type openCodeCLIQueryCacheEntry struct {
 // deck sessions are driving. An unbound instance then adopts only a session
 // created after its own spawn; a sibling's fresh activity is not evidence.
 func findBestOpenCodeSession(sessions []openCodeSessionMetadata, projectPath, currentID string, startedAt, activityAt int64, sharedService bool) string {
+	if sharedService && currentID == "" && startedAt <= 0 {
+		// Without a spawn time an unbound instance cannot tell its conversation from a sibling's.
+		return ""
+	}
 	normalizedProjectPath := normalizePath(projectPath)
 
 	var bestMatch string
@@ -3079,7 +3083,20 @@ func (i *Instance) queryOpenCodeSession() string {
 	projectPath := i.ProjectPath
 	currentID := i.OpenCodeSessionID
 	startedAt := i.OpenCodeStartedAt
+	lastStartedAt := i.LastStartedAt
 	i.mu.RUnlock()
+
+	sharedService := port == 0 && i.openCodeRejectsV1LaunchFlags()
+	var minCreated int64
+	if sharedService && currentID == "" {
+		// OpenCodeStartedAt is not persisted, so a reloaded instance falls back to its last start.
+		if startedAt <= 0 && !lastStartedAt.IsZero() {
+			startedAt = lastStartedAt.UnixMilli()
+		}
+		if startedAt > 0 {
+			minCreated = startedAt - opencodeStartupTimeSkew.Milliseconds()
+		}
+	}
 
 	var sessions []openCodeSessionMetadata
 	if port > 0 {
@@ -3094,7 +3111,7 @@ func (i *Instance) queryOpenCodeSession() string {
 			return ""
 		}
 	} else {
-		sessions = i.queryOpenCodeSessionsCLI(projectPath)
+		sessions = i.queryOpenCodeSessionsCLI(projectPath, currentID, minCreated)
 	}
 
 	sessionLog.Debug("opencode_parsed_sessions", slog.Int("count", len(sessions)))
@@ -3107,7 +3124,6 @@ func (i *Instance) queryOpenCodeSession() string {
 		}
 	}
 
-	sharedService := port == 0 && i.openCodeRejectsV1LaunchFlags()
 	bestMatch := findBestOpenCodeSession(sessions, projectPath, currentID, startedAt, activityAt, sharedService)
 	sessionLog.Debug(
 		"opencode_best_match",
@@ -3155,14 +3171,12 @@ func (i *Instance) queryOpenCodeSessionsHTTP(port int, projectPath string) ([]op
 	return sessions, nil
 }
 
-func (i *Instance) queryOpenCodeSessionsCLI(projectPath string) []openCodeSessionMetadata {
+// minCreated is the earliest creation time an unbound 2.x instance may adopt; 0 means any.
+func (i *Instance) queryOpenCodeSessionsCLI(projectPath, currentID string, minCreated int64) []openCodeSessionMetadata {
 	cacheKey := normalizePath(projectPath)
-	i.mu.RLock()
-	currentID := i.OpenCodeSessionID
-	i.mu.RUnlock()
 	if i.openCodeRejectsV1LaunchFlags() {
-		// The 2.x pager stops at the bound session, so a page set is only complete for that binding.
-		cacheKey += "\x00" + currentID
+		// The 2.x pager stops at what this caller can use, so a page set is only complete for that caller.
+		cacheKey += "\x00" + currentID + "\x00" + strconv.FormatInt(minCreated, 10)
 	}
 	if sessions, ok := cachedOpenCodeCLISessions(cacheKey); ok {
 		return sessions
@@ -3172,7 +3186,7 @@ func (i *Instance) queryOpenCodeSessionsCLI(projectPath string) []openCodeSessio
 		if sessions, ok := cachedOpenCodeCLISessions(cacheKey); ok {
 			return sessions, nil
 		}
-		sessions := i.runOpenCodeSessionsCLI(projectPath, currentID)
+		sessions := i.runOpenCodeSessionsCLI(projectPath, currentID, minCreated)
 		cacheOpenCodeCLISessions(cacheKey, sessions)
 		return sessions, nil
 	})
@@ -3208,7 +3222,7 @@ func cacheOpenCodeCLISessions(cacheKey string, sessions []openCodeSessionMetadat
 	}
 }
 
-func (i *Instance) runOpenCodeSessionsCLI(projectPath, currentID string) []openCodeSessionMetadata {
+func (i *Instance) runOpenCodeSessionsCLI(projectPath, currentID string, minCreated int64) []openCodeSessionMetadata {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -3222,7 +3236,7 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath, currentID string) []openC
 	)
 
 	if v2 {
-		return i.runOpenCodeServiceSessionPages(ctx, projectPath, currentID)
+		return i.runOpenCodeServiceSessionPages(ctx, projectPath, currentID, minCreated)
 	}
 
 	output, ok := i.runOpenCodeCLI(ctx, projectPath, "opencode", "session", "list", "--format", "json")
@@ -3264,11 +3278,12 @@ func (i *Instance) runOpenCodeCLI(ctx context.Context, projectPath, binary strin
 }
 
 // runOpenCodeServiceSessionPages walks `session.list` pages newest first and
-// stops once it has a root session and, for a bound instance, the bound one:
-// returning before the bound session is seen would rebind to a newer sibling.
+// stops once it holds a root the caller can use: the bound session for a bound
+// instance, else a root created at or after minCreated. Returning before the
+// bound session is seen would rebind to a newer sibling.
 // A failed page, or hitting the page cap before the bound session, returns
 // nothing for the same reason.
-func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPath, currentID string) []openCodeSessionMetadata {
+func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPath, currentID string, minCreated int64) []openCodeSessionMetadata {
 	// The version that picked this path came from the configured binary, which a bare name may not reach.
 	binary, ok := i.openCodeLaunchBinary()
 	if !ok {
@@ -3277,7 +3292,7 @@ func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPa
 
 	var sessions []openCodeSessionMetadata
 	cursor := ""
-	currentSeen := false
+	usableSeen := false
 	for page := 0; page < openCodeServiceSessionMaxPages; page++ {
 		args := []string{"api", "session.list",
 			"--param", "directory=" + projectPath,
@@ -3294,17 +3309,17 @@ func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPa
 			return nil
 		}
 		for _, root := range roots {
-			if root.ID == currentID {
-				currentSeen = true
+			if (currentID != "" && root.ID == currentID) || (currentID == "" && root.Created >= minCreated) {
+				usableSeen = true
 			}
 		}
 		sessions = append(sessions, roots...)
-		if next == "" || (len(sessions) > 0 && (currentID == "" || currentSeen)) {
+		if next == "" || usableSeen {
 			return sessions
 		}
 		cursor = next
 	}
-	if currentID != "" && !currentSeen {
+	if currentID != "" && !usableSeen {
 		return nil
 	}
 	return sessions
