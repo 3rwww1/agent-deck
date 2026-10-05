@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,6 +26,18 @@ func setFakeOpenCodePath(t *testing.T, script string, includeSystemPath bool) {
 		pathValue += string(os.PathListSeparator) + os.Getenv("PATH")
 	}
 	t.Setenv("PATH", pathValue)
+}
+
+// configureFakeOpenCode points [opencode].command at the stub on PATH: 2.x
+// discovery resolves the configured binary with the spawn-path dirs first, so
+// a bare name could reach the host's real opencode.
+func configureFakeOpenCode(t *testing.T) {
+	t.Helper()
+	stub, err := exec.LookPath("opencode")
+	if err != nil {
+		t.Fatalf("look up fake opencode: %v", err)
+	}
+	isolateOpenCodeConfig(t, stub)
 }
 
 func TestUpdateOpenCodeSession_ManagedPortUsesHTTPNestedTimes(t *testing.T) {
@@ -246,6 +259,7 @@ func TestQueryOpenCodeSession_V2QueriesSharedServiceAndSkipsChildren(t *testing.
 	argv := filepath.Join(t.TempDir(), "argv")
 	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nprintf '%%s\\n' %q\n", argv, payload)
 	setFakeOpenCodePath(t, script, false)
+	configureFakeOpenCode(t)
 
 	inst := &Instance{Tool: "opencode", ProjectPath: projectPath}
 	if got := inst.queryOpenCodeSession(); got != "ses_ROOT" {
@@ -298,6 +312,7 @@ func setFakeOpenCodeServicePages(t *testing.T, page1, page2 string) string {
 		"case \"$*\" in *cursor=c1*) printf '%%s\\n' %[3]q;; *) printf '%%s\\n' %[2]q;; esac\n",
 		dir, page1, page2)
 	setFakeOpenCodePath(t, script, false)
+	configureFakeOpenCode(t)
 	return dir
 }
 
@@ -400,5 +415,27 @@ func TestQueryOpenCodeSession_V2DropsResultWhenPageCapHitsBeforeBoundSession(t *
 	}
 	if got := fakeOpenCodeCallCount(t, dir); got != openCodeServiceSessionMaxPages {
 		t.Fatalf("opencode call count = %d, want %d", got, openCodeServiceSessionMaxPages)
+	}
+}
+
+func TestQueryOpenCodeSession_V2RunsConfiguredBinary(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	page := func(id string) string {
+		return fmt.Sprintf(`{"data":[`+
+			`{"id":%q,"parentID":null,"location":{"directory":%q},"time":{"created":1000,"updated":2000}}`+
+			`],"cursor":{"previous":null,"next":null}}`, id, projectPath)
+	}
+	commandDir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", page("ses_CONFIGURED"))
+	if err := os.WriteFile(filepath.Join(commandDir, "opencode"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write configured opencode: %v", err)
+	}
+	isolateOpenCodeConfig(t, "PATH="+commandDir+":$PATH opencode")
+	setFakeOpenCodePath(t, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", page("ses_PROCESS_PATH")), false)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath}
+	if got := inst.queryOpenCodeSession(); got != "ses_CONFIGURED" {
+		t.Fatalf("session ID = %q, want ses_CONFIGURED (discovery must run the configured binary)", got)
 	}
 }

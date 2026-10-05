@@ -3215,7 +3215,7 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath, currentID string) []openC
 		return i.runOpenCodeServiceSessionPages(ctx, projectPath, currentID)
 	}
 
-	output, ok := i.runOpenCodeCLI(ctx, projectPath, "session", "list", "--format", "json")
+	output, ok := i.runOpenCodeCLI(ctx, projectPath, "opencode", "session", "list", "--format", "json")
 	if !ok {
 		return nil
 	}
@@ -3231,8 +3231,8 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath, currentID string) []openC
 	return sessions
 }
 
-func (i *Instance) runOpenCodeCLI(ctx context.Context, projectPath string, args ...string) ([]byte, bool) {
-	cmd := exec.CommandContext(ctx, "opencode", args...)
+func (i *Instance) runOpenCodeCLI(ctx context.Context, projectPath, binary string, args ...string) ([]byte, bool) {
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = projectPath
 	cmd.WaitDelay = 500 * time.Millisecond
 
@@ -3259,6 +3259,12 @@ func (i *Instance) runOpenCodeCLI(ctx context.Context, projectPath string, args 
 // A failed page, or hitting the page cap before the bound session, returns
 // nothing for the same reason.
 func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPath, currentID string) []openCodeSessionMetadata {
+	// The version that picked this path came from the configured binary, which a bare name may not reach.
+	binary, ok := i.openCodeLaunchBinary()
+	if !ok {
+		return nil
+	}
+
 	var sessions []openCodeSessionMetadata
 	cursor := ""
 	currentSeen := false
@@ -3269,7 +3275,7 @@ func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPa
 		if cursor != "" {
 			args = append(args, "--param", "cursor="+cursor)
 		}
-		output, ok := i.runOpenCodeCLI(ctx, projectPath, args...)
+		output, ok := i.runOpenCodeCLI(ctx, projectPath, binary, args...)
 		if !ok {
 			return nil
 		}
