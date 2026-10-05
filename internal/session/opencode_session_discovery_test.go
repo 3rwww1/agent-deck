@@ -285,3 +285,79 @@ func TestQueryOpenCodeSession_V1KeepsSessionListCommand(t *testing.T) {
 		t.Fatalf("opencode argv =\n%s\nwant\n%s", gotArgv, want)
 	}
 }
+
+// setFakeOpenCodeServicePages serves page1 on a cursor-less call and page2 when
+// the argv carries cursor=c1, recording every argv under dir/argv.N. Builtins
+// only: the fake PATH holds nothing but the stub.
+func setFakeOpenCodeServicePages(t *testing.T, page1, page2 string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\n"+
+		"n=0; read -r n < %[1]q/count 2>/dev/null; n=$((n+1)); echo $n > %[1]q/count\n"+
+		"printf '%%s\\n' \"$@\" > %[1]q/argv.$n\n"+
+		"case \"$*\" in *cursor=c1*) printf '%%s\\n' %[3]q;; *) printf '%%s\\n' %[2]q;; esac\n",
+		dir, page1, page2)
+	setFakeOpenCodePath(t, script, false)
+	return dir
+}
+
+func fakeOpenCodeCallCount(t *testing.T, dir string) int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "count"))
+	if err != nil {
+		t.Fatalf("read call count: %v", err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("parse call count %q: %v", raw, err)
+	}
+	return n
+}
+
+func TestQueryOpenCodeSession_V2FollowsCursorPastChildOnlyPage(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	page1 := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_CHILD1","parentID":"ses_ROOT","location":{"directory":%q},"time":{"created":5000,"updated":6000}},`+
+		`{"id":"ses_CHILD2","parentID":"ses_ROOT","location":{"directory":%q},"time":{"created":3000,"updated":4000}}`+
+		`],"cursor":{"previous":null,"next":"c1"}}`, projectPath, projectPath)
+	page2 := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_ROOT","parentID":null,"location":{"directory":%q},"time":{"created":1000,"updated":2000}}`+
+		`],"cursor":{"previous":"p1","next":"c2"}}`, projectPath)
+	dir := setFakeOpenCodeServicePages(t, page1, page2)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath}
+	if got := inst.queryOpenCodeSession(); got != "ses_ROOT" {
+		t.Fatalf("session ID = %q, want ses_ROOT", got)
+	}
+	if got := fakeOpenCodeCallCount(t, dir); got != 2 {
+		t.Fatalf("opencode call count = %d, want 2 (stop once a root is in hand)", got)
+	}
+	gotArgv, err := os.ReadFile(filepath.Join(dir, "argv.2"))
+	if err != nil {
+		t.Fatalf("read second argv: %v", err)
+	}
+	if !strings.Contains(string(gotArgv), "--param\ncursor=c1\n") {
+		t.Fatalf("second call argv =\n%s\nwant a cursor=c1 param", gotArgv)
+	}
+}
+
+func TestQueryOpenCodeSession_V2KeepsBoundSessionFoundOnLaterPage(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	page1 := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_NEWER","parentID":null,"location":{"directory":%q},"time":{"created":5000,"updated":6000}}`+
+		`],"cursor":{"previous":null,"next":"c1"}}`, projectPath)
+	page2 := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_BOUND","parentID":null,"location":{"directory":%q},"time":{"created":1000,"updated":2000}}`+
+		`],"cursor":{"previous":"p1","next":null}}`, projectPath)
+	dir := setFakeOpenCodeServicePages(t, page1, page2)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeSessionID: "ses_BOUND"}
+	if got := inst.queryOpenCodeSession(); got != "ses_BOUND" {
+		t.Fatalf("session ID = %q, want ses_BOUND", got)
+	}
+	if got := fakeOpenCodeCallCount(t, dir); got != 2 {
+		t.Fatalf("opencode call count = %d, want 2 (page past the newer sibling)", got)
+	}
+}

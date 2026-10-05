@@ -2958,12 +2958,19 @@ func (s openCodeHTTPSessionMetadata) flatten() openCodeSessionMetadata {
 // openCodeServiceSessionPage is one page of `opencode api session.list` on
 // 2.x, where sessions live in the shared background service.
 type openCodeServiceSessionPage struct {
-	Data []openCodeHTTPSessionMetadata `json:"data"`
+	Data   []openCodeHTTPSessionMetadata `json:"data"`
+	Cursor struct {
+		Next string `json:"next"`
+	} `json:"cursor"`
 }
 
 // The service pages at 50 by default and the directory filter still returns
 // every sub-agent session, so one page can miss the root the TUI is in.
 const openCodeServiceSessionPageSize = 200
+
+// A page can be nothing but sub-agent sessions, so discovery follows the cursor
+// until it holds a root and the bound session; the cap bounds a runaway store.
+const openCodeServiceSessionMaxPages = 5
 
 type openCodeCLIQueryCacheEntry struct {
 	queriedAt time.Time
@@ -3191,38 +3198,19 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath string) []openCodeSessionM
 	// On 2.x `session list` prints [] for a directory: the sessions live in the
 	// shared background service and `opencode api` is the CLI's door to it.
 	v2 := i.openCodeRejectsV1LaunchFlags()
-	args := []string{"session", "list", "--format", "json"}
-	if v2 {
-		args = []string{"api", "session.list",
-			"--param", "directory=" + projectPath,
-			"--param", "limit=" + strconv.Itoa(openCodeServiceSessionPageSize)}
-	}
-	cmd := exec.CommandContext(ctx, "opencode", args...)
-	cmd.Dir = projectPath
-	cmd.WaitDelay = 500 * time.Millisecond
 
 	sessionLog.Debug("opencode_query_sessions",
 		slog.String("dir", logging.SanitizeValue(projectPath)),
 		slog.Bool("service_api", v2),
 	)
 
-	output, err := cmd.Output()
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			sessionLog.Warn("opencode_query_timeout",
-				slog.String("dir", logging.SanitizeValue(projectPath)),
-				slog.String("instance_id", i.ID),
-			)
-		} else {
-			sessionLog.Debug("opencode_query_failed", slog.String("error", err.Error()))
-		}
-		return nil
+	if v2 {
+		return i.runOpenCodeServiceSessionPages(ctx, projectPath)
 	}
 
-	sessionLog.Debug("opencode_session_data_size", slog.Int("bytes", len(output)))
-
-	if v2 {
-		return parseOpenCodeServiceSessionPage(output)
+	output, ok := i.runOpenCodeCLI(ctx, projectPath, "session", "list", "--format", "json")
+	if !ok {
+		return nil
 	}
 
 	// Parse JSON response
@@ -3236,14 +3224,77 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath string) []openCodeSessionM
 	return sessions
 }
 
+func (i *Instance) runOpenCodeCLI(ctx context.Context, projectPath string, args ...string) ([]byte, bool) {
+	cmd := exec.CommandContext(ctx, "opencode", args...)
+	cmd.Dir = projectPath
+	cmd.WaitDelay = 500 * time.Millisecond
+
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			sessionLog.Warn("opencode_query_timeout",
+				slog.String("dir", logging.SanitizeValue(projectPath)),
+				slog.String("instance_id", i.ID),
+			)
+		} else {
+			sessionLog.Debug("opencode_query_failed", slog.String("error", err.Error()))
+		}
+		return nil, false
+	}
+
+	sessionLog.Debug("opencode_session_data_size", slog.Int("bytes", len(output)))
+	return output, true
+}
+
+// runOpenCodeServiceSessionPages walks `session.list` pages newest first and
+// stops once it has a root session and, for a bound instance, the bound one:
+// returning before the bound session is seen would rebind to a newer sibling.
+// A failed page returns nothing for the same reason.
+func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPath string) []openCodeSessionMetadata {
+	i.mu.RLock()
+	currentID := i.OpenCodeSessionID
+	i.mu.RUnlock()
+
+	var sessions []openCodeSessionMetadata
+	cursor := ""
+	currentSeen := false
+	for page := 0; page < openCodeServiceSessionMaxPages; page++ {
+		args := []string{"api", "session.list",
+			"--param", "directory=" + projectPath,
+			"--param", "limit=" + strconv.Itoa(openCodeServiceSessionPageSize)}
+		if cursor != "" {
+			args = append(args, "--param", "cursor="+cursor)
+		}
+		output, ok := i.runOpenCodeCLI(ctx, projectPath, args...)
+		if !ok {
+			return nil
+		}
+		roots, next, ok := parseOpenCodeServiceSessionPage(output)
+		if !ok {
+			return nil
+		}
+		for _, root := range roots {
+			if root.ID == currentID {
+				currentSeen = true
+			}
+		}
+		sessions = append(sessions, roots...)
+		if next == "" || (len(sessions) > 0 && (currentID == "" || currentSeen)) {
+			break
+		}
+		cursor = next
+	}
+	return sessions
+}
+
 // parseOpenCodeServiceSessionPage keeps root sessions only: a sub-agent
 // session shares the directory and is updated more recently than the TUI's
 // own, so it would win the best-match rotation and rebind the instance.
-func parseOpenCodeServiceSessionPage(output []byte) []openCodeSessionMetadata {
+func parseOpenCodeServiceSessionPage(output []byte) ([]openCodeSessionMetadata, string, bool) {
 	var page openCodeServiceSessionPage
 	if err := json.Unmarshal(output, &page); err != nil {
 		sessionLog.Debug("opencode_parse_failed", slog.String("error", err.Error()))
-		return nil
+		return nil, "", false
 	}
 	sessions := make([]openCodeSessionMetadata, 0, len(page.Data))
 	for _, session := range page.Data {
@@ -3252,7 +3303,7 @@ func parseOpenCodeServiceSessionPage(output []byte) []openCodeSessionMetadata {
 		}
 		sessions = append(sessions, session.flatten())
 	}
-	return sessions
+	return sessions, page.Cursor.Next, true
 }
 
 // normalizePath normalizes a file path for comparison
