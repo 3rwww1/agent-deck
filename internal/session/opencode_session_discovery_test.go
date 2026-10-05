@@ -361,3 +361,44 @@ func TestQueryOpenCodeSession_V2KeepsBoundSessionFoundOnLaterPage(t *testing.T) 
 		t.Fatalf("opencode call count = %d, want 2 (page past the newer sibling)", got)
 	}
 }
+
+func TestQueryOpenCodeSession_V2BoundInstanceSkipsUnboundCachedPage(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	page1 := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_NEWER","parentID":null,"location":{"directory":%q},"time":{"created":5000,"updated":6000}}`+
+		`],"cursor":{"previous":null,"next":"c1"}}`, projectPath)
+	page2 := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_BOUND","parentID":null,"location":{"directory":%q},"time":{"created":1000,"updated":2000}}`+
+		`],"cursor":{"previous":"p1","next":null}}`, projectPath)
+	setFakeOpenCodeServicePages(t, page1, page2)
+
+	unbound := &Instance{Tool: "opencode", ProjectPath: projectPath}
+	if got := unbound.queryOpenCodeSession(); got != "ses_NEWER" {
+		t.Fatalf("unbound session ID = %q, want ses_NEWER", got)
+	}
+	bound := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeSessionID: "ses_BOUND"}
+	if got := bound.queryOpenCodeSession(); got != "ses_BOUND" {
+		t.Fatalf("bound session ID = %q, want ses_BOUND (unbound page-1 result reused)", got)
+	}
+}
+
+func TestQueryOpenCodeSession_V2DropsResultWhenPageCapHitsBeforeBoundSession(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	page1 := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_SIB1","parentID":null,"location":{"directory":%q},"time":{"created":5000,"updated":6000}}`+
+		`],"cursor":{"previous":null,"next":"c1"}}`, projectPath)
+	page2 := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_SIB2","parentID":null,"location":{"directory":%q},"time":{"created":3000,"updated":4000}}`+
+		`],"cursor":{"previous":"p1","next":"c1"}}`, projectPath)
+	dir := setFakeOpenCodeServicePages(t, page1, page2)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeSessionID: "ses_BOUND"}
+	if got := inst.queryOpenCodeSession(); got != "" {
+		t.Fatalf("session ID = %q, want empty (bound session may sit past the page cap)", got)
+	}
+	if got := fakeOpenCodeCallCount(t, dir); got != openCodeServiceSessionMaxPages {
+		t.Fatalf("opencode call count = %d, want %d", got, openCodeServiceSessionMaxPages)
+	}
+}

@@ -3147,6 +3147,13 @@ func (i *Instance) queryOpenCodeSessionsHTTP(port int, projectPath string) ([]op
 
 func (i *Instance) queryOpenCodeSessionsCLI(projectPath string) []openCodeSessionMetadata {
 	cacheKey := normalizePath(projectPath)
+	i.mu.RLock()
+	currentID := i.OpenCodeSessionID
+	i.mu.RUnlock()
+	if i.openCodeRejectsV1LaunchFlags() {
+		// The 2.x pager stops at the bound session, so a page set is only complete for that binding.
+		cacheKey += "\x00" + currentID
+	}
 	if sessions, ok := cachedOpenCodeCLISessions(cacheKey); ok {
 		return sessions
 	}
@@ -3155,7 +3162,7 @@ func (i *Instance) queryOpenCodeSessionsCLI(projectPath string) []openCodeSessio
 		if sessions, ok := cachedOpenCodeCLISessions(cacheKey); ok {
 			return sessions, nil
 		}
-		sessions := i.runOpenCodeSessionsCLI(projectPath)
+		sessions := i.runOpenCodeSessionsCLI(projectPath, currentID)
 		cacheOpenCodeCLISessions(cacheKey, sessions)
 		return sessions, nil
 	})
@@ -3191,7 +3198,7 @@ func cacheOpenCodeCLISessions(cacheKey string, sessions []openCodeSessionMetadat
 	}
 }
 
-func (i *Instance) runOpenCodeSessionsCLI(projectPath string) []openCodeSessionMetadata {
+func (i *Instance) runOpenCodeSessionsCLI(projectPath, currentID string) []openCodeSessionMetadata {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -3205,7 +3212,7 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath string) []openCodeSessionM
 	)
 
 	if v2 {
-		return i.runOpenCodeServiceSessionPages(ctx, projectPath)
+		return i.runOpenCodeServiceSessionPages(ctx, projectPath, currentID)
 	}
 
 	output, ok := i.runOpenCodeCLI(ctx, projectPath, "session", "list", "--format", "json")
@@ -3249,12 +3256,9 @@ func (i *Instance) runOpenCodeCLI(ctx context.Context, projectPath string, args 
 // runOpenCodeServiceSessionPages walks `session.list` pages newest first and
 // stops once it has a root session and, for a bound instance, the bound one:
 // returning before the bound session is seen would rebind to a newer sibling.
-// A failed page returns nothing for the same reason.
-func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPath string) []openCodeSessionMetadata {
-	i.mu.RLock()
-	currentID := i.OpenCodeSessionID
-	i.mu.RUnlock()
-
+// A failed page, or hitting the page cap before the bound session, returns
+// nothing for the same reason.
+func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPath, currentID string) []openCodeSessionMetadata {
 	var sessions []openCodeSessionMetadata
 	cursor := ""
 	currentSeen := false
@@ -3280,9 +3284,12 @@ func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPa
 		}
 		sessions = append(sessions, roots...)
 		if next == "" || (len(sessions) > 0 && (currentID == "" || currentSeen)) {
-			break
+			return sessions
 		}
 		cursor = next
+	}
+	if currentID != "" && !currentSeen {
+		return nil
 	}
 	return sessions
 }
