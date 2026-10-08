@@ -3031,6 +3031,13 @@ func findBestOpenCodeSession(sessions []openCodeSessionMetadata, projectPath, cu
 			continue
 		}
 
+		if sharedService && currentID != "" {
+			// The shared service lists every deck session's conversation in this
+			// directory, so neither recent activity nor a missing binding makes a
+			// sibling ours: keep the binding, or report nothing.
+			continue
+		}
+
 		if currentID == "" && startedAt > 0 {
 			if sharedService && sess.Created < startupThreshold {
 				continue

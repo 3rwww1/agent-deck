@@ -536,3 +536,31 @@ func TestQueryOpenCodeSession_V2UnboundPagesPastRootsCreatedBeforeSpawn(t *testi
 		t.Fatalf("opencode call count = %d, want 2 (page past roots created before spawn)", got)
 	}
 }
+
+// On 2.x the shared service lists every deck session's conversation in the
+// directory, so recent local activity is no evidence that a newer sibling
+// belongs to this instance.
+func TestFindBestOpenCodeSession_V2BoundKeepsSessionOverNewerSibling(t *testing.T) {
+	const now int64 = 200000
+	sessions := []openCodeSessionMetadata{
+		{ID: "ses_ours", Directory: "/project", Created: 100000, Updated: 190000},
+		{ID: "ses_other", Directory: "/project", Created: 100000, Updated: 200000},
+	}
+	if got := findBestOpenCodeSession(sessions, "/project", "ses_ours", 100000, now, true); got != "ses_ours" {
+		t.Fatalf("bound 2.x instance adopted a sibling: got %q, want ses_ours", got)
+	}
+}
+
+func TestQueryOpenCodeSession_V2BoundMissingSessionDoesNotAdoptSibling(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	projectPath := t.TempDir()
+	page := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_SIBLING","parentID":null,"location":{"directory":%q},"time":{"created":5000,"updated":6000}}`+
+		`],"cursor":{"previous":null,"next":null}}`, projectPath)
+	setFakeOpenCodeServicePages(t, page, page)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeSessionID: "ses_GONE"}
+	if got := inst.queryOpenCodeSession(); got != "" {
+		t.Fatalf("bound 2.x instance whose session is gone adopted a sibling: %q", got)
+	}
+}
