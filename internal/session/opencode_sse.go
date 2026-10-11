@@ -259,6 +259,10 @@ func (w *OpenCodeSSEWatcher) stream(ctx context.Context, instanceID string, src 
 	seeded := w.seedSnapshot(ctx, src, busy)
 	if seeded && len(busy) > 0 {
 		w.setStatus(instanceID, "running")
+	} else if seeded && src.sessionID != "" {
+		// A turn that ended while the stream was down must not leave the
+		// bound session running; the shared snapshot lists busy sessions only.
+		w.setStatus(instanceID, "waiting")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+src.eventPath, nil)

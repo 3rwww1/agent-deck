@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -32,6 +33,13 @@ func sharedServiceEvent(eventType, sessionID string) string {
 // /api route, a session.active snapshot, and one /api/event stream per client
 // fed from events (each subscriber gets every event, as on the real service).
 func sharedServiceServer(t *testing.T, snapshot string) (*httptest.Server, func(string)) {
+	t.Helper()
+	return sharedServiceServerFunc(t, func() string { return snapshot })
+}
+
+// sharedServiceServerFunc is sharedServiceServer with a snapshot that can
+// change between connections.
+func sharedServiceServerFunc(t *testing.T, snapshot func() string) (*httptest.Server, func(string)) {
 	t.Helper()
 	type sub struct{ ch chan string }
 	subs := make(chan sub, 16)
@@ -63,7 +71,7 @@ func sharedServiceServer(t *testing.T, snapshot string) (*httptest.Server, func(
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, snapshot)
+		fmt.Fprint(w, snapshot())
 	})
 	mux.HandleFunc("/api/event", func(w http.ResponseWriter, r *http.Request) {
 		if !authorized(r) {
@@ -137,7 +145,7 @@ func TestOpenCodeSSEWatcher_SharedServiceFiltersBoundSession(t *testing.T) {
 
 	send(sharedServiceEvent("session.execution.started", sesOther))
 	waitForStatus(t, w, "inst-other", "running")
-	if s := w.GetStatus("inst-bound"); s != nil {
+	if s := w.GetStatus("inst-bound"); s != nil && s.Status == "running" {
 		t.Fatalf("another session's events must not set the bound instance's status, got %+v", s)
 	}
 
@@ -180,7 +188,8 @@ func TestOpenCodeSSEWatcher_SharedServiceTurnEndings(t *testing.T) {
 }
 
 // TestOpenCodeSSEWatcher_SharedServiceSnapshotSeedsBoundOnly: connecting
-// mid-turn seeds running from session.active, but only for the bound session.
+// mid-turn seeds running from session.active, but only for the bound session;
+// a bound session absent from the snapshot is idle, so it seeds waiting.
 func TestOpenCodeSSEWatcher_SharedServiceSnapshotSeedsBoundOnly(t *testing.T) {
 	srv, _ := sharedServiceServer(t, `{"data":{"`+sesOther+`":{"type":"running"}}}`)
 	w := NewOpenCodeSSEWatcher(nil)
@@ -190,9 +199,7 @@ func TestOpenCodeSSEWatcher_SharedServiceSnapshotSeedsBoundOnly(t *testing.T) {
 		sharedTarget("inst-other", sesOther, srv.URL),
 	})
 	waitForStatus(t, w, "inst-other", "running")
-	if s := w.GetStatus("inst-bound"); s != nil {
-		t.Fatalf("snapshot of another session must not seed the bound instance, got %+v", s)
-	}
+	waitForStatus(t, w, "inst-bound", "waiting")
 }
 
 // TestOpenCodeSSEWatcher_SharedServiceFeedsInstanceFastPath: the derived
@@ -258,13 +265,30 @@ func TestOpenCodeSSEWatcher_SharedServiceRebindReconnects(t *testing.T) {
 	waitForStatus(t, w, "inst-1", "running")
 
 	w.Sync([]SSETarget{sharedTarget("inst-1", sesBound, srv.URL)})
-	if s := w.GetStatus("inst-1"); s != nil {
+	if s := w.GetStatus("inst-1"); s != nil && s.Status == "running" {
 		t.Fatalf("rebinding must drop the old session's status, got %+v", s)
 	}
 	waitConnected()
 	send(sharedServiceEvent("session.execution.succeeded", sesOther))
 	send(sharedServiceEvent("session.execution.started", sesBound))
 	waitForStatus(t, w, "inst-1", "running")
+}
+
+// TestOpenCodeSSEWatcher_SharedServiceReconnectSnapshotClearsRunning: a turn
+// that ended while the stream was down is read from the reconnect snapshot,
+// so the instance does not stay running.
+func TestOpenCodeSSEWatcher_SharedServiceReconnectSnapshotClearsRunning(t *testing.T) {
+	var snapshot atomic.Value
+	snapshot.Store(`{"data":{"` + sesBound + `":{"type":"running"}}}`)
+	srv, _ := sharedServiceServerFunc(t, func() string { return snapshot.Load().(string) })
+	w := NewOpenCodeSSEWatcher(nil)
+	defer w.Stop()
+	w.Sync([]SSETarget{sharedTarget("inst-1", sesBound, srv.URL)})
+	waitForStatus(t, w, "inst-1", "running")
+
+	snapshot.Store(`{"data":{}}`)
+	srv.CloseClientConnections()
+	waitForStatus(t, w, "inst-1", "waiting")
 }
 
 // TestOpenCodeSSETarget_V1Unchanged: on 1.x the target is the per-TUI --port
