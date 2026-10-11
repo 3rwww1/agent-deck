@@ -258,11 +258,11 @@ func (w *OpenCodeSSEWatcher) stream(ctx context.Context, instanceID string, src 
 	busy := make(map[string]bool)
 	seeded := w.seedSnapshot(ctx, src, busy)
 	if seeded && len(busy) > 0 {
-		w.setStatus(instanceID, "running")
+		w.setStatus(ctx, instanceID, "running")
 	} else if seeded && src.sessionID != "" {
 		// A turn that ended while the stream was down must not leave the
 		// bound session running; the shared snapshot lists busy sessions only.
-		w.setStatus(instanceID, "waiting")
+		w.setStatus(ctx, instanceID, "waiting")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+src.eventPath, nil)
@@ -301,20 +301,20 @@ func (w *OpenCodeSSEWatcher) stream(ctx context.Context, instanceID string, src 
 		payload, ok := strings.CutPrefix(line, "data: ")
 		if !ok {
 			// Comment/heartbeat line: refresh freshness of the known status.
-			w.touch(instanceID)
+			w.touch(ctx, instanceID)
 			continue
 		}
 		var ev openCodeEvent
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
-			w.touch(instanceID)
+			w.touch(ctx, instanceID)
 			continue
 		}
 		if src.sessionID != "" {
 			if !applySharedServiceEvent(ev, src.sessionID, busy) {
-				w.touch(instanceID)
+				w.touch(ctx, instanceID)
 				continue
 			}
-			w.setStatus(instanceID, busyStatus(busy))
+			w.setStatus(ctx, instanceID, busyStatus(busy))
 			continue
 		}
 		switch ev.Type {
@@ -331,13 +331,13 @@ func (w *OpenCodeSSEWatcher) stream(ctx context.Context, instanceID string, src 
 			delete(busy, ev.Properties.SessionID)
 		default:
 			// Unrelated event (heartbeat, tui.*, ...): liveness only.
-			w.touch(instanceID)
+			w.touch(ctx, instanceID)
 			continue
 		}
 		if len(busy) > 0 {
-			w.setStatus(instanceID, "running")
+			w.setStatus(ctx, instanceID, "running")
 		} else {
-			w.setStatus(instanceID, "waiting")
+			w.setStatus(ctx, instanceID, "waiting")
 		}
 	}
 	return gotData
@@ -425,8 +425,14 @@ func (w *OpenCodeSSEWatcher) seedSnapshot(ctx context.Context, src openCodeEvent
 }
 
 // setStatus records a derived status and fires onChange on transitions.
-func (w *OpenCodeSSEWatcher) setStatus(instanceID, status string) {
+// ctx is the connection's context: Sync cancels a replaced connection under
+// w.mu without waiting for its stream, so a late write from it is dropped here.
+func (w *OpenCodeSSEWatcher) setStatus(ctx context.Context, instanceID, status string) {
 	w.mu.Lock()
+	if ctx.Err() != nil {
+		w.mu.Unlock()
+		return
+	}
 	prev := w.statuses[instanceID]
 	changed := prev == nil || prev.Status != status
 	w.statuses[instanceID] = &OpenCodeSSEStatus{Status: status, UpdatedAt: time.Now()}
@@ -439,9 +445,9 @@ func (w *OpenCodeSSEWatcher) setStatus(instanceID, status string) {
 
 // touch refreshes the freshness timestamp of an existing status without
 // changing it, so a quiet-but-connected stream keeps the fast path alive.
-func (w *OpenCodeSSEWatcher) touch(instanceID string) {
+func (w *OpenCodeSSEWatcher) touch(ctx context.Context, instanceID string) {
 	w.mu.Lock()
-	if s, ok := w.statuses[instanceID]; ok {
+	if s, ok := w.statuses[instanceID]; ok && ctx.Err() == nil {
 		s.UpdatedAt = time.Now()
 	}
 	w.mu.Unlock()

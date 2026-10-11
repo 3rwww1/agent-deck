@@ -5,6 +5,7 @@ package session
 // service (`GET /api/event`, `GET /api/session/active`).
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -289,6 +290,27 @@ func TestOpenCodeSSEWatcher_SharedServiceReconnectSnapshotClearsRunning(t *testi
 	snapshot.Store(`{"data":{}}`)
 	srv.CloseClientConnections()
 	waitForStatus(t, w, "inst-1", "waiting")
+}
+
+// TestOpenCodeSSEWatcher_ReplacedConnectionCannotPublish: Sync cancels a
+// replaced connection without waiting for its goroutine, so a late write from
+// the old stream must not overwrite what the new connection published.
+func TestOpenCodeSSEWatcher_ReplacedConnectionCannotPublish(t *testing.T) {
+	w := NewOpenCodeSSEWatcher(nil)
+	oldConn, cancelOld := context.WithCancel(context.Background())
+	newConn := context.Background()
+
+	w.setStatus(newConn, "inst-1", "running")
+	cancelOld()
+	w.setStatus(oldConn, "inst-1", "waiting")
+	if s := w.GetStatus("inst-1"); s == nil || s.Status != "running" {
+		t.Fatalf("replaced connection overwrote the live status, got %+v", s)
+	}
+
+	w.setStatus(oldConn, "inst-2", "running")
+	if s := w.GetStatus("inst-2"); s != nil {
+		t.Fatalf("replaced connection created a status, got %+v", s)
+	}
 }
 
 // TestOpenCodeSSETarget_V1Unchanged: on 1.x the target is the per-TUI --port
