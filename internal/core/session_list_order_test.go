@@ -16,7 +16,7 @@ func TestLiveSessionRowsKeepInputOrder(t *testing.T) {
 		// Odd rows take the probe path: with no tmux session it never spawns tmux.
 		cached[instances[i]] = i%2 == 0
 	}
-	rows := liveSessionRows(context.Background(), "_test", instances, cached, nil)
+	rows := liveSessionRows(context.Background(), "_test", instances, cached, nil, session.NewListingPass())
 	if len(rows) != len(instances) {
 		t.Fatalf("got %d rows, want %d", len(rows), len(instances))
 	}
