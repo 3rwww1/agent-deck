@@ -3529,8 +3529,8 @@ type statusCounts struct {
 	total   int
 }
 
-// countByStatus calls each after a session refresh and before counting it, so rows match counts.
-func countByStatus(instances []*session.Instance, each func(*session.Instance)) statusCounts {
+// countByStatus optionally returns each counted substate, read before the status it can settle.
+func countByStatus(instances []*session.Instance, withSubstates bool) (statusCounts, map[*session.Instance]session.Substate) {
 	// Warm tmux pane-title cache + load hook statuses so `status`/`status --json`
 	// reports the same counts the TUI and /api/menu do (issue #610).
 	session.RefreshInstancesForCLIStatus(instances)
@@ -3542,10 +3542,14 @@ func countByStatus(instances []*session.Instance, each func(*session.Instance)) 
 	// A count needs live status only; native session discovery belongs to the poller.
 	var pass session.StatusUpdatePass
 	var counts statusCounts
+	var substates map[*session.Instance]session.Substate
+	if withSubstates {
+		substates = make(map[*session.Instance]session.Substate, len(instances))
+	}
 	for _, inst := range instances {
 		_ = pass.UpdateStatusOnly(inst)
-		if each != nil {
-			each(inst)
+		if withSubstates {
+			substates[inst] = inst.Substate()
 		}
 		switch inst.Status {
 		case session.StatusRunning:
@@ -3561,7 +3565,7 @@ func countByStatus(instances []*session.Instance, each func(*session.Instance)) 
 		}
 		counts.total++
 	}
-	return counts
+	return counts, substates
 }
 
 // handleStatus shows session status summary
@@ -3685,20 +3689,22 @@ func handleStatus(profile string, args []string) {
 		Total    int                 `json:"total"`
 		Sessions []statusSessionJSON `json:"sessions,omitempty"`
 	}
-	// Verbose rows read the substate in the counting pass: it can settle the status counted.
+	// Quiet text output prints only the waiting count, so it needs no per-row substate.
+	showRows := (*verbose || *verboseShort) && (*jsonOutput || !(*quiet || *quietShort))
+	counts, substates := countByStatus(instances, showRows)
 	var rows []statusSessionJSON
-	substates := make(map[*session.Instance]session.Substate)
-	var collectRow func(*session.Instance)
-	switch {
-	case *jsonOutput && (*verbose || *verboseShort):
-		collectRow = func(inst *session.Instance) {
-			substate := string(inst.Substate()) // before Status: see buildListJSON
+	if *jsonOutput && showRows {
+		for _, inst := range instances {
+			substate, counted := substates[inst]
+			if !counted {
+				continue
+			}
 			sj := statusSessionJSON{
 				ID:             inst.ID,
 				Title:          inst.Title,
 				Tool:           inst.Tool,
 				Status:         StatusString(inst.Status),
-				Substate:       substate,
+				Substate:       string(substate),
 				ExitCode:       inst.ExitCode(),
 				SubstateDetail: inst.SubstateDetail(),
 				BackgroundWork: inst.BackgroundWorkJSON(),
@@ -3711,10 +3717,7 @@ func handleStatus(profile string, args []string) {
 			}
 			rows = append(rows, sj)
 		}
-	case *verbose || *verboseShort:
-		collectRow = func(inst *session.Instance) { substates[inst] = inst.Substate() }
 	}
-	counts := countByStatus(instances, collectRow)
 
 	// Output based on flags
 	if *jsonOutput {
