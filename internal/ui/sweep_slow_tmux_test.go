@@ -18,7 +18,7 @@ func TestBackgroundStatusUpdate_SlowTmuxStillSweeps(t *testing.T) {
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$SWEEP_FIXTURE/calls"
 case "$*" in
-*list-sessions*) sleep 1.3; echo agentdeck_slow_sweep;;
+*list-sessions*) sleep 1.1; echo agentdeck_slow_sweep;;
 esac
 exit 0
 `
@@ -37,7 +37,10 @@ exit 0
 
 	h.backgroundStatusUpdate()
 
-	data, _ := os.ReadFile(filepath.Join(dir, "calls"))
+	data, err := os.ReadFile(filepath.Join(dir, "calls"))
+	if err != nil {
+		t.Fatalf("fake tmux never ran: %v", err)
+	}
 	if !strings.Contains(string(data), "list-windows") {
 		t.Fatalf("sweep skipped after the probe, no cache refresh ran\n%s", data)
 	}

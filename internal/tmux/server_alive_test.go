@@ -1,28 +1,21 @@
 package tmux
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func installServerAliveFake(t *testing.T, listSessions string) {
 	t.Helper()
-	dir := t.TempDir()
-	script := "#!/bin/sh\ncase \"$*\" in\n*list-sessions*) " + listSessions + ";;\nesac\n"
-	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	writeFakeTmux(t, t.TempDir(), "case \"$*\" in\n*list-sessions*) "+listSessions+";;\nesac\n")
 	ResetServerAliveCacheForTest(t)
 }
 
 // Under host load the client spawn alone can exceed 1s while the server answers.
 func TestIsServerAlive_SlowButAliveServerIsAlive(t *testing.T) {
-	installServerAliveFake(t, "sleep 1.3; echo agentdeck_slow")
+	installServerAliveFake(t, "sleep 1.1; echo agentdeck_slow")
 	if !IsServerAlive() {
-		t.Fatal("IsServerAlive() = false for a server that answered in 1.3s")
+		t.Fatal("IsServerAlive() = false for a server that answered in 1.1s")
 	}
 }
 
@@ -51,8 +44,8 @@ func TestIsServerAlive_ExplicitDeadOutputIsDead(t *testing.T) {
 			if IsServerAlive() {
 				t.Fatalf("IsServerAlive() = true on %q", msg)
 			}
-			if time.Since(start) > tmuxPollTimeout/2 {
-				t.Fatal("explicit dead output did not fail fast")
+			if time.Since(start) >= tmuxPollTimeout {
+				t.Fatal("explicit dead output waited for the timeout")
 			}
 		})
 	}

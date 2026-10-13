@@ -94,7 +94,7 @@ func ExpirePaneInfoCacheForTest(t testing.TB) {
 	})
 }
 
-// ResetServerAliveCacheForTest makes the next IsServerAlive probe, now and after the test.
+// ResetServerAliveCacheForTest forces the next IsServerAlive call to probe, now and after the test.
 func ResetServerAliveCacheForTest(t testing.TB) {
 	t.Helper()
 	reset := func() {
