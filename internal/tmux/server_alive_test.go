@@ -35,8 +35,8 @@ func TestIsServerAlive_HungServerTimesOut(t *testing.T) {
 	if alive {
 		t.Fatal("IsServerAlive() = true for a hung server")
 	}
-	if elapsed > serverAliveProbeTimeout+2*time.Second {
-		t.Fatalf("hung probe took %s, want about %s", elapsed, serverAliveProbeTimeout)
+	if elapsed > tmuxPollTimeout+2*time.Second {
+		t.Fatalf("hung probe took %s, want about %s", elapsed, tmuxPollTimeout)
 	}
 	start = time.Now()
 	if IsServerAlive() || time.Since(start) > 100*time.Millisecond {
@@ -52,7 +52,7 @@ func TestIsServerAlive_ExplicitDeadOutputIsDead(t *testing.T) {
 			if IsServerAlive() {
 				t.Fatalf("IsServerAlive() = true on %q", msg)
 			}
-			if time.Since(start) > time.Second {
+			if time.Since(start) > tmuxPollTimeout/2 {
 				t.Fatal("explicit dead output did not fail fast")
 			}
 		})

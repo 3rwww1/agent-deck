@@ -28,6 +28,8 @@ exit 0
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	tmux.ResetServerAliveCacheForTest()
 	t.Cleanup(tmux.ResetServerAliveCacheForTest)
+	tmux.SeedPaneInfoCacheForTest(t, nil)
+	tmux.SeedWindowCacheForTest(t, nil)
 
 	h := newHomeForSnapshotTest()
 	inst := &session.Instance{ID: "slow", Title: "slow", Tool: "shell", Status: session.StatusIdle, ProjectPath: dir, CreatedAt: time.Now().Add(-time.Hour)}
