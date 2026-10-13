@@ -261,8 +261,9 @@ func IsServerAlive() bool {
 		if serverAliveTimeouts >= 2 {
 			serverAliveVal = false
 		}
-		serverAliveTime = time.Time{}
-		if !serverAliveVal {
+		if serverAliveVal {
+			serverAliveTime = time.Time{}
+		} else {
 			serverAliveTime = time.Now()
 		}
 		alive = serverAliveVal
