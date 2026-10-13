@@ -28,7 +28,7 @@ func installStaleCacheFake(t *testing.T) (dir string) {
 [ -f "$STALE_FIXTURE/down" ] && { echo 'no server running' >&2; exit 1; }
 [ -f "$STALE_FIXTURE/slow" ] && sleep 0.3
 case "$*" in
-*list-windows*) cat "$STALE_FIXTURE/windows";;
+*list-windows*) [ -f "$STALE_FIXTURE/slow-listing" ] && sleep 2.3; cat "$STALE_FIXTURE/windows";;
 *"list-panes -a"*) cat "$STALE_FIXTURE/panes";;
 *list-panes*) echo 0;;
 *display-message*) echo 100;;
@@ -309,15 +309,7 @@ func TestStaleCacheRefresh_SlowListingServesLaterRows(t *testing.T) {
 	RefreshPaneInfoCache()
 	expireSharedCaches()
 	_ = callCounts(t, dir)
-	writeFakeTmux(t, dir, `printf '%s\n' "$*" >> "$STALE_FIXTURE/calls"
-case "$*" in
-*list-windows*) sleep 2.3; cat "$STALE_FIXTURE/windows";;
-*"list-panes -a"*) cat "$STALE_FIXTURE/panes";;
-*list-panes*) echo 0;;
-*display-message*) echo 100;;
-esac
-exit 0
-`)
+	writeStaleFixture(t, dir, "slow-listing", "")
 
 	for k := 0; k < 3; k++ {
 		_ = staleSession(k).Exists()
