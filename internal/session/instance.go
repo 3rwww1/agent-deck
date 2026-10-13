@@ -12151,9 +12151,8 @@ func (i *Instance) Substate() Substate {
 	if s := i.getTerminatedPaneSubstate(); s != SubstateNone {
 		return s
 	}
-	tmuxSess := i.GetTmuxSession()
 	i.mu.RLock()
-	listedAbsent := i.listedAbsent
+	tmuxSess, listedAbsent := i.tmuxSession, i.listedAbsent
 	i.mu.RUnlock()
 	if tmuxSess == nil || tmuxSess == listedAbsent {
 		return SubstateNone
