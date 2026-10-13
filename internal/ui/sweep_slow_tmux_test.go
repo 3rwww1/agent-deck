@@ -11,8 +11,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
-// Under host load one tmux client spawn can take over a second while the
-// server is fine. The sweep must still run, or the screen stops updating.
+// A slow but alive tmux must not skip the sweep, or the screen stops updating.
 func TestBackgroundStatusUpdate_SlowTmuxStillSweeps(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SWEEP_FIXTURE", dir)
@@ -32,7 +31,7 @@ exit 0
 
 	h := newHomeForSnapshotTest()
 	inst := &session.Instance{ID: "slow", Title: "slow", Tool: "shell", Status: session.StatusIdle, ProjectPath: dir, CreatedAt: time.Now().Add(-time.Hour)}
-	inst.SetTmuxSessionForTest(&tmux.Session{Name: "agentdeck_slow_sweep", SocketName: "slow-sweep-fixture"})
+	inst.SetTmuxSessionForTest(&tmux.Session{Name: "agentdeck_slow_sweep", SocketName: ""})
 	h.instances = append(h.instances, inst)
 
 	h.backgroundStatusUpdate()

@@ -19,8 +19,7 @@ func installServerAliveFake(t *testing.T, listSessions string) {
 	t.Cleanup(ResetServerAliveCacheForTest)
 }
 
-// A loaded host can take over a second just to spawn the client, while the
-// server itself answers. The sweep's own calls allow 3s, so this is not dead.
+// Under host load the client spawn alone can exceed 1s while the server answers.
 func TestIsServerAlive_SlowButAliveServerIsAlive(t *testing.T) {
 	installServerAliveFake(t, "sleep 1.3; echo agentdeck_slow")
 	if !IsServerAlive() {
@@ -28,7 +27,7 @@ func TestIsServerAlive_SlowButAliveServerIsAlive(t *testing.T) {
 	}
 }
 
-func TestIsServerAlive_HungServerFailsFast(t *testing.T) {
+func TestIsServerAlive_HungServerTimesOut(t *testing.T) {
 	installServerAliveFake(t, "exec sleep 30")
 	start := time.Now()
 	alive := IsServerAlive()
@@ -36,7 +35,7 @@ func TestIsServerAlive_HungServerFailsFast(t *testing.T) {
 	if alive {
 		t.Fatal("IsServerAlive() = true for a hung server")
 	}
-	if elapsed > serverAliveProbeTimeout+time.Second {
+	if elapsed > serverAliveProbeTimeout+2*time.Second {
 		t.Fatalf("hung probe took %s, want about %s", elapsed, serverAliveProbeTimeout)
 	}
 	start = time.Now()

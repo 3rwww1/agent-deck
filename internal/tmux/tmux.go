@@ -223,8 +223,7 @@ func captureGoneFromErr(err error) bool {
 
 const SessionPrefix = "agentdeck_"
 
-// A slow answer is not a dead server: under host load one client spawn can
-// take over a second, so match the 3s the sweep's own calls allow.
+// A slow spawn is not a dead server, so wait as long as a real call would.
 const serverAliveProbeTimeout = 3 * time.Second
 
 // serverAlive tracks whether the tmux server is responsive.
