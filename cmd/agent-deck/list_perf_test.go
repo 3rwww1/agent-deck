@@ -52,6 +52,13 @@ func TestPerf_ColdStart_List100(t *testing.T) {
 
 func listPerfFixture(t *testing.T) (*harness.Sandbox, []string, string) {
 	t.Helper()
+	return sessionFixture(t, 100, 0)
+}
+
+// sessionFixture seeds codex then opencode sessions behind counting tmux and
+// opencode fakes; opencode calls land in $HOME/opencode-calls.
+func sessionFixture(t *testing.T, codex, opencode int) (*harness.Sandbox, []string, string) {
+	t.Helper()
 	sb := harness.NewSandbox(t)
 	profileDir := filepath.Join(sb.Home, ".agent-deck", "profiles", "default")
 	if err := os.MkdirAll(profileDir, 0700); err != nil {
@@ -64,19 +71,23 @@ func listPerfFixture(t *testing.T) (*harness.Sandbox, []string, string) {
 	if err := db.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	rows := make([]*statedb.InstanceRow, 100)
+	rows := make([]*statedb.InstanceRow, codex+opencode)
 	var names, windows, panes strings.Builder
 	for n := range rows {
+		tool := "codex"
+		if n >= codex {
+			tool = "opencode"
+		}
 		id := fmt.Sprintf("list-perf-%03d", n)
 		name := "agentdeck_" + id
 		rows[n] = &statedb.InstanceRow{
 			ID: id, Title: id, ProjectPath: sb.Home, GroupPath: "my-sessions",
-			Tool: "codex", Command: "codex", Status: "waiting", TmuxSession: name,
+			Tool: tool, Command: tool, Status: "waiting", TmuxSession: name,
 			CreatedAt: time.Now().Add(-time.Hour), ToolData: json.RawMessage(`{}`),
 		}
 		fmt.Fprintln(&names, name)
-		fmt.Fprintf(&windows, "%s|1|0|codex\n", name)
-		fmt.Fprintf(&panes, "%s|codex|0|0|0|⠋ Working\n", name)
+		fmt.Fprintf(&windows, "%s|1|0|%s\n", name, tool)
+		fmt.Fprintf(&panes, "%s|%s|0|0|0|⠋ Working\n", name, tool)
 	}
 	if err := db.SaveInstances(rows); err != nil {
 		t.Fatal(err)
@@ -106,6 +117,10 @@ done
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(sb.ShimDir, "tmux"), []byte(shim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	opencodeShim := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/opencode-calls\"\nprintf '[]\\n'\n"
+	if err := os.WriteFile(filepath.Join(sb.ShimDir, "opencode"), []byte(opencodeShim), 0700); err != nil {
 		t.Fatal(err)
 	}
 	return sb, perfEnv(sb), filepath.Join(sb.Home, "tmux-calls")
@@ -140,39 +155,58 @@ func runListFixture(t *testing.T, sb *harness.Sandbox, env []string) {
 }
 
 // status only counts, so it must read live status without native-session
-// discovery, the same as list --json.
+// discovery or tmux environment traffic, and -v must reuse the counting pass.
 func TestStatusJSON_NoSessionDiscovery(t *testing.T) {
-	for _, args := range [][]string{{"status", "--json"}, {"status", "--json", "-v"}} {
-		t.Run(strings.Join(args[1:], " "), func(t *testing.T) { runStatusNoDiscovery(t, args) })
+	plain := runStatusFixture(t, "--json")
+	verbose := runStatusFixture(t, "--json", "-v")
+	t.Logf("tmux calls: --json=%d --json -v=%d (%d sessions)", plain, verbose, statusFixtureSessions)
+	// -v adds one substate pane capture per row on top of the counting pass.
+	if verbose > plain+statusFixtureSessions {
+		t.Errorf("--json -v tmux calls=%d, want <= %d (--json %d + one per row)", verbose, plain+statusFixtureSessions, plain)
 	}
 }
 
-func runStatusNoDiscovery(t *testing.T, args []string) {
+const statusFixtureCodex, statusFixtureOpenCode = 8, 2
+const statusFixtureSessions = statusFixtureCodex + statusFixtureOpenCode
+
+// runStatusFixture runs status against a fresh fixture and returns its tmux call count.
+func runStatusFixture(t *testing.T, args ...string) int {
 	t.Helper()
-	sb, env, calls := listPerfFixture(t)
+	sb, env, calls := sessionFixture(t, statusFixtureCodex, statusFixtureOpenCode)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, sb.BinPath, args...)
+	cmd := exec.CommandContext(ctx, sb.BinPath, append([]string{"status"}, args...)...)
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("status: %v\n%s", err, out)
+		t.Fatalf("status %v: %v\n%s", args, err, out)
 	}
-	var counts struct {
-		Running int `json:"running"`
-		Total   int `json:"total"`
+	var resp struct {
+		Running  int               `json:"running"`
+		Total    int               `json:"total"`
+		Sessions []json.RawMessage `json:"sessions"`
 	}
-	if err := json.Unmarshal(out, &counts); err != nil {
-		t.Fatalf("status JSON: %v\n%s", err, out)
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("status %v JSON: %v\n%s", args, err, out)
 	}
-	if counts.Running != 100 || counts.Total != 100 {
-		t.Errorf("counts running=%d total=%d, want 100/100 from live panes", counts.Running, counts.Total)
+	if resp.Total != statusFixtureSessions || resp.Running != resp.Total {
+		t.Errorf("status %v running=%d total=%d, want %d/%d from live panes", args, resp.Running, resp.Total, statusFixtureSessions, statusFixtureSessions)
+	}
+	if len(args) > 1 && len(resp.Sessions) != resp.Total {
+		t.Errorf("status %v sessions=%d, total=%d; rows and counts must cover the same set", args, len(resp.Sessions), resp.Total)
 	}
 	data, err := os.ReadFile(calls)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "CODEX_SESSION_ID") {
-		t.Error("status performed native Codex session discovery")
+	log := string(data)
+	for _, banned := range []string{"CODEX_SESSION_ID", "set-environment", "show-environment"} {
+		if n := strings.Count(log, banned); n != 0 {
+			t.Errorf("status %v made %d tmux calls containing %q", args, n, banned)
+		}
 	}
+	if oc, err := os.ReadFile(filepath.Join(sb.Home, "opencode-calls")); err == nil {
+		t.Errorf("status %v ran opencode:\n%s", args, oc)
+	}
+	return strings.Count(log, "\n")
 }
