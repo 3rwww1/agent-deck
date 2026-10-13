@@ -262,8 +262,9 @@ func IsServerAlive() bool {
 		}
 		alive = serverAliveVal
 	default:
-		alive = err == nil || strings.Contains(string(out), "no server running") ||
-			(!strings.Contains(string(out), "server exited") && !strings.Contains(string(out), "lost server"))
+		msg := string(out)
+		lost := strings.Contains(msg, "server exited") || strings.Contains(msg, "lost server")
+		alive = err == nil || strings.Contains(msg, "no server running") || !lost
 		serverAliveTimeouts = 0
 		serverAliveVal = alive
 		serverAliveTime = time.Now()
