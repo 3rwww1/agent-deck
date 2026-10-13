@@ -628,8 +628,10 @@ func registerSessionInCache(name string) {
 	}
 
 	// Add session with current time as activity, and drop any listing taken before it existed
-	sessionCacheData[name] = time.Now().Unix()
-	sessionCacheStarted = time.Now()
+	now := time.Now()
+	sessionCacheData[name] = now.Unix()
+	sessionCacheStarted = now
+	sessionCacheStoredAt = now
 }
 
 // sessionActivityFromCache gets session activity timestamp from cache

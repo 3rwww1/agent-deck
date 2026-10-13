@@ -281,3 +281,23 @@ func TestStaleCacheRefresh_RegisteredSessionSurvivesOlderListing(t *testing.T) {
 		t.Fatal("a listing taken before the session existed dropped it")
 	}
 }
+
+// A refresh that fails after a session was registered keeps that session.
+func TestStaleCacheRefresh_FailedRefreshKeepsRegisteredSession(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	RefreshSessionCache()
+	writeStaleFixture(t, dir, "down", "")
+	writeFakeTmux(t, dir, `sleep 0.3; echo 'no server running' >&2; exit 1
+`)
+	done := make(chan struct{})
+	go func() { RefreshSessionCache(); close(done) }()
+	time.Sleep(100 * time.Millisecond)
+	registerSessionInCache("new-one")
+	<-done
+	sessionCacheMu.RLock()
+	_, kept := sessionCacheData["new-one"]
+	sessionCacheMu.RUnlock()
+	if !kept {
+		t.Fatal("a refresh that began before the session was registered wiped it on failure")
+	}
+}
