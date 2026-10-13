@@ -1,6 +1,15 @@
 package session
 
-import "github.com/asheshgoplani/agent-deck/internal/tmux"
+import (
+	"strings"
+
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
+)
+
+// NewListingPass is for serial CLI listing loops only.
+func NewListingPass() *StatusUpdatePass {
+	return &StatusUpdatePass{pinLiveness: true}
+}
 
 var listStatusSessionNames = tmux.ListSessionNamesOnSocket
 
@@ -10,10 +19,9 @@ var listStatusSessionNames = tmux.ListSessionNamesOnSocket
 // which may still have a live pane. A cached error row still gets the
 // terminated-pane classification updateStatus would give it (exit receipt,
 // #2091 hook evidence), computed without a tmux probe.
-func CLIStatusCandidates(instances []*Instance) ([]*Instance, map[*Instance]bool) {
+func (p *StatusUpdatePass) CLIStatusCandidates(instances []*Instance) ([]*Instance, map[*Instance]bool) {
 	refresh := make([]*Instance, 0, len(instances))
 	cached := make(map[*Instance]bool)
-	bySocket := make(map[string]map[string]struct{})
 	for _, inst := range instances {
 		if inst == nil {
 			continue
@@ -28,16 +36,8 @@ func CLIStatusCandidates(instances []*Instance) ([]*Instance, map[*Instance]bool
 			cached[inst] = true
 			continue
 		}
-		names, ok := bySocket[sess.SocketName]
-		if !ok {
-			var err error
-			names, err = listStatusSessionNames(sess.SocketName)
-			if err != nil {
-				names = nil
-			}
-			bySocket[sess.SocketName] = names
-		}
-		if names == nil && inst.Status == StatusError {
+		names, ok := p.listSessionNames(sess.SocketName)
+		if !ok && inst.Status == StatusError {
 			refresh = append(refresh, inst)
 			continue
 		}
@@ -87,4 +87,31 @@ func (i *Instance) classifyAbsentError(sess *tmux.Session) {
 	i.terminatedPaneSubstate = substate
 	i.setTerminatedPaneExitCode(exitCode, haveExitCode)
 	i.refreshAuthHoldOnDeathLocked()
+}
+
+// sessionNames is false outside a listing pass or for an indeterminate listing.
+func (p *StatusUpdatePass) sessionNames(socket string) (map[string]struct{}, bool) {
+	if p == nil || !p.pinLiveness {
+		return nil, false
+	}
+	return p.listSessionNames(socket)
+}
+
+// listSessionNames keys on the trimmed name, as tmuxArgs resolves -L.
+func (p *StatusUpdatePass) listSessionNames(socket string) (map[string]struct{}, bool) {
+	key := strings.TrimSpace(socket)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if names, ok := p.liveNames[key]; ok {
+		return names, names != nil
+	}
+	names, err := listStatusSessionNames(key)
+	if err != nil {
+		names = nil
+	}
+	if p.liveNames == nil {
+		p.liveNames = make(map[string]map[string]struct{})
+	}
+	p.liveNames[key] = names
+	return names, names != nil
 }

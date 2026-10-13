@@ -25,7 +25,7 @@ func TestCLIStatusCandidatesRefreshesLiveHistoryAndSharesSocketRead(t *testing.T
 			rows = append(rows, inst)
 		}
 	}
-	refresh, cached := CLIStatusCandidates(rows)
+	refresh, cached := NewListingPass().CLIStatusCandidates(rows)
 	if calls != 1 || len(refresh) != 2 || len(cached) != 2 {
 		t.Fatalf("socket reads=%d refresh=%d cached=%d", calls, len(refresh), len(cached))
 	}
@@ -37,7 +37,7 @@ func TestCLIStatusCandidatesRefreshesLiveHistoryAndSharesSocketRead(t *testing.T
 	listStatusSessionNames = func(string) (map[string]struct{}, error) {
 		return nil, errors.New("inventory unavailable")
 	}
-	refresh, cached = CLIStatusCandidates(rows)
+	refresh, cached = NewListingPass().CLIStatusCandidates(rows)
 	if len(refresh) != 2 || len(cached) != 2 {
 		t.Fatal("indeterminate error rows must refresh; stopped history remains cached")
 	}
@@ -62,7 +62,7 @@ func TestCLIStatusCandidatesStoppedBudget(t *testing.T) {
 				instances[i] = inst
 			}
 			start := time.Now()
-			refresh, cached := CLIStatusCandidates(instances)
+			refresh, cached := NewListingPass().CLIStatusCandidates(instances)
 			elapsed := time.Since(start)
 			if len(refresh) != 0 || len(cached) != tc.count {
 				t.Fatalf("refresh=%d cached=%d, want 0 and %d", len(refresh), len(cached), tc.count)
@@ -89,7 +89,7 @@ func TestCLIStatusCandidatesAbsentHistory(t *testing.T) {
 				}
 				inst.tmuxSession = tmux.ReconnectSessionLazy("absent", "history", "", "", "inactive")
 				inst.tmuxSession.SocketName = "list-history-regression-absent"
-				refresh, cached := CLIStatusCandidates([]*Instance{inst})
+				refresh, cached := NewListingPass().CLIStatusCandidates([]*Instance{inst})
 				if len(refresh) != 0 || !cached[inst] {
 					t.Fatal("absent historical row must retain cached status")
 				}
@@ -102,7 +102,7 @@ func TestCLIStatusCandidatesRefreshesArchivedLiveStatus(t *testing.T) {
 	for _, status := range []Status{StatusWaiting, StatusRunning} {
 		inst := &Instance{Status: status, ArchivedAt: time.Now()}
 		inst.tmuxSession = tmux.ReconnectSessionLazy("absent", "history", "", "", "inactive")
-		refresh, cached := CLIStatusCandidates([]*Instance{inst})
+		refresh, cached := NewListingPass().CLIStatusCandidates([]*Instance{inst})
 		if len(refresh) != 1 || cached[inst] {
 			t.Fatal("archived live status must be refreshed, not preserved as terminal history")
 		}

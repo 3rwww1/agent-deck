@@ -18,7 +18,7 @@ func TestApplyTerminatedPaneStatus_HoldsLockOnReturn(t *testing.T) {
 	i := &Instance{Tool: "claude", Status: StatusRunning}
 
 	i.mu.Lock()
-	i.applyTerminatedPaneStatus()
+	i.applyTerminatedPaneStatus(false)
 
 	// The helper must have reacquired the lock; TryLock on an already-held
 	// mutex returns false.
@@ -46,7 +46,7 @@ func TestApplyTerminatedPaneStatus_StoppedGuard(t *testing.T) {
 	i := &Instance{Tool: "claude", Status: StatusStopped}
 
 	i.mu.Lock()
-	i.applyTerminatedPaneStatus()
+	i.applyTerminatedPaneStatus(false)
 	got := i.Status
 	i.mu.Unlock()
 
@@ -68,7 +68,7 @@ func TestApplyTerminatedPaneStatus_ConcurrentRaceSafe(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			i.mu.Lock()
-			i.applyTerminatedPaneStatus()
+			i.applyTerminatedPaneStatus(false)
 			i.mu.Unlock()
 		}()
 	}
