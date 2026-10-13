@@ -39,9 +39,10 @@ type WindowInfo struct {
 // Pane info cache - one list-panes call per tick instead of per-session queries.
 // Mirrors the sessionCacheData pattern (tmux.go:38-42).
 var (
-	paneCacheMu   sync.RWMutex
-	paneCacheData map[string]PaneInfo
-	paneCacheTime time.Time
+	paneCacheMu      sync.RWMutex
+	paneCacheData    map[string]PaneInfo
+	paneCacheTime    time.Time
+	paneCacheStarted time.Time
 )
 
 // Window cache - populated alongside session cache from the same list-windows call.
@@ -152,13 +153,10 @@ func updateWindowToolCache(windowTools map[string]map[int]string) {
 // to read cached values. Tries PipeManager first, falls back to subprocess.
 func RefreshPaneInfoCache() {
 	paneCacheGate.markWarm()
+	started := time.Now()
 	if pm := GetPipeManager(); pm != nil {
 		if info, windowTools, err := pm.RefreshAllPaneInfo(); err == nil && len(info) > 0 {
-			paneCacheMu.Lock()
-			paneCacheData = info
-			paneCacheTime = time.Now()
-			paneCacheMu.Unlock()
-			updateWindowToolCache(windowTools)
+			storePaneCache(started, info, windowTools)
 			return
 		}
 		statusLog.Debug("pane_cache_subprocess_fallback")
@@ -184,12 +182,20 @@ func RefreshPaneInfoCache() {
 	}
 
 	newCache, windowTools := parseListPanesOutput(string(output))
+	storePaneCache(started, newCache, windowTools)
+}
 
+// storePaneCache drops a listing that began before the stored one, so a slower, older refresh never wins.
+func storePaneCache(started time.Time, info map[string]PaneInfo, windowTools map[string]map[int]string) {
 	paneCacheMu.Lock()
-	paneCacheData = newCache
+	if started.Before(paneCacheStarted) {
+		paneCacheMu.Unlock()
+		return
+	}
+	paneCacheData = info
 	paneCacheTime = time.Now()
+	paneCacheStarted = started
 	paneCacheMu.Unlock()
-
 	updateWindowToolCache(windowTools)
 }
 

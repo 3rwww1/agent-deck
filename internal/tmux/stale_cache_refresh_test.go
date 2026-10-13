@@ -50,10 +50,10 @@ func resetStaleCachesForTest(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		sessionCacheMu.Lock()
-		sessionCacheData, sessionCacheTime = nil, time.Time{}
+		sessionCacheData, sessionCacheTime, sessionCacheStarted = nil, time.Time{}, time.Time{}
 		sessionCacheMu.Unlock()
 		paneCacheMu.Lock()
-		paneCacheData, paneCacheTime = nil, time.Time{}
+		paneCacheData, paneCacheTime, paneCacheStarted = nil, time.Time{}, time.Time{}
 		paneCacheMu.Unlock()
 		resetCacheRefreshGatesForTest()
 	}
@@ -232,5 +232,21 @@ func TestStaleCacheRefresh_IsolatedSocketSkipsSharedRefresh(t *testing.T) {
 	got := callCounts(t, dir)
 	if got["list-windows"] != 0 || got["list-panes -a"] != 0 {
 		t.Fatalf("isolated-socket row calls = %v, want no default-server listing", got)
+	}
+}
+
+// A gated refresh and the tick's refresh can overlap: the listing that began last must win.
+func TestStaleCacheRefresh_OlderListingNeverOverwritesNewer(t *testing.T) {
+	resetStaleCachesForTest(t)
+	older, newer := time.Now(), time.Now().Add(time.Millisecond)
+	storeSessionCache(newer, map[string]int64{"fresh": 1}, nil)
+	storeSessionCache(older, map[string]int64{"killed": 1}, nil)
+	storePaneCache(newer, map[string]PaneInfo{"fresh": {}}, nil)
+	storePaneCache(older, map[string]PaneInfo{"killed": {}}, nil)
+	if exists, valid := sessionExistsFromCache("killed"); !valid || exists {
+		t.Fatalf("older session listing won: exists=%v valid=%v", exists, valid)
+	}
+	if _, ok := GetCachedPaneInfo("killed"); ok {
+		t.Fatal("older pane listing won")
 	}
 }

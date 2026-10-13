@@ -252,8 +252,10 @@ func IsServerAlive() bool {
 
 	serverAliveMu.Lock()
 	var alive bool
+	msg := string(out)
+	lost := strings.Contains(msg, "server exited") || strings.Contains(msg, "lost server")
 	switch {
-	case err != nil && ctx.Err() == context.DeadlineExceeded:
+	case err != nil && !lost && ctx.Err() == context.DeadlineExceeded:
 		// Only a hung or loaded server times out, so death needs two timeouts in a row.
 		if serverAliveVerdicts == verdictsBefore {
 			serverAliveVerdicts++
@@ -269,8 +271,6 @@ func IsServerAlive() bool {
 		}
 		alive = serverAliveVal
 	default:
-		msg := string(out)
-		lost := strings.Contains(msg, "server exited") || strings.Contains(msg, "lost server")
 		alive = err == nil || !lost
 		serverAliveTimeouts = 0
 		serverAliveVal = alive
@@ -292,6 +292,8 @@ var (
 	sessionCacheMu   sync.RWMutex
 	sessionCacheData map[string]int64 // session_name -> activity_timestamp (0 if not in cache)
 	sessionCacheTime time.Time
+	// sessionCacheStarted is when the stored listing began, so a slower, older refresh never overwrites it.
+	sessionCacheStarted time.Time
 )
 
 // sessionCacheTTL is the single TTL governing both sessionExistsFromCache
@@ -328,19 +330,12 @@ func RefreshSessionCache() {
 	finish := logging.TraceOp(perfLog, "refresh_session_cache", 100*time.Millisecond)
 	defer finish()
 	sessionCacheGate.markWarm()
+	started := time.Now()
 
 	// Try control mode pipe first (zero subprocess)
 	if pm := GetPipeManager(); pm != nil {
 		if activities, windows, err := pm.RefreshAllActivities(); err == nil && len(activities) > 0 {
-			sessionCacheMu.Lock()
-			sessionCacheData = activities
-			sessionCacheTime = time.Now()
-			sessionCacheMu.Unlock()
-
-			windowCacheMu.Lock()
-			windowCacheData = windows
-			windowCacheTime = time.Now()
-			windowCacheMu.Unlock()
+			storeSessionCache(started, activities, windows)
 			return
 		}
 		// Pipe failed: log it so we can verify zero subprocess usage
@@ -354,22 +349,33 @@ func RefreshSessionCache() {
 	output, err := commandOutput(cmd)
 	if err != nil {
 		sessionCacheMu.Lock()
-		sessionCacheData = nil
-		sessionCacheTime = time.Time{}
-		sessionCacheGate.markFailed()
+		if !started.Before(sessionCacheStarted) {
+			sessionCacheData = nil
+			sessionCacheTime = time.Time{}
+			sessionCacheStarted = started
+			sessionCacheGate.markFailed()
+		}
 		sessionCacheMu.Unlock()
 		return
 	}
 
 	newSessionCache, newWindowCache := parseListWindowsOutput(string(output))
+	storeSessionCache(started, newSessionCache, newWindowCache)
+}
 
+func storeSessionCache(started time.Time, sessions map[string]int64, windows map[string][]WindowInfo) {
 	sessionCacheMu.Lock()
-	sessionCacheData = newSessionCache
+	if started.Before(sessionCacheStarted) {
+		sessionCacheMu.Unlock()
+		return
+	}
+	sessionCacheData = sessions
 	sessionCacheTime = time.Now()
+	sessionCacheStarted = started
 	sessionCacheMu.Unlock()
 
 	windowCacheMu.Lock()
-	windowCacheData = newWindowCache
+	windowCacheData = windows
 	windowCacheTime = time.Now()
 	windowCacheMu.Unlock()
 }
