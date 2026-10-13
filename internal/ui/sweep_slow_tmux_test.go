@@ -26,8 +26,7 @@ exit 0
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	tmux.ResetServerAliveCacheForTest()
-	t.Cleanup(tmux.ResetServerAliveCacheForTest)
+	tmux.ResetServerAliveCacheForTest(t)
 	tmux.SeedPaneInfoCacheForTest(t, nil)
 	tmux.SeedWindowCacheForTest(t, nil)
 

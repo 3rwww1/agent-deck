@@ -93,3 +93,16 @@ func ExpirePaneInfoCacheForTest(t testing.TB) {
 		paneCacheMu.Unlock()
 	})
 }
+
+// ResetServerAliveCacheForTest makes the next IsServerAlive probe, now and after the test.
+func ResetServerAliveCacheForTest(t testing.TB) {
+	t.Helper()
+	reset := func() {
+		serverAliveMu.Lock()
+		serverAliveVal = true
+		serverAliveTime = time.Time{}
+		serverAliveMu.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+}

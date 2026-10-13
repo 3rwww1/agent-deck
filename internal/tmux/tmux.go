@@ -266,14 +266,6 @@ func IsServerAlive() bool {
 	return alive
 }
 
-// ResetServerAliveCacheForTest forces the next IsServerAlive call to probe.
-func ResetServerAliveCacheForTest() {
-	serverAliveMu.Lock()
-	defer serverAliveMu.Unlock()
-	serverAliveVal = true
-	serverAliveTime = time.Time{}
-}
-
 // Session cache - reduces subprocess spawns from O(n) to O(1) per tick
 // Instead of calling `tmux has-session` and `tmux display-message` for each session,
 // we call `tmux list-sessions` ONCE and cache both existence and activity timestamps

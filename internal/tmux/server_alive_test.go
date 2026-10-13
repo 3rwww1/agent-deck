@@ -15,8 +15,7 @@ func installServerAliveFake(t *testing.T, listSessions string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	ResetServerAliveCacheForTest()
-	t.Cleanup(ResetServerAliveCacheForTest)
+	ResetServerAliveCacheForTest(t)
 }
 
 // Under host load the client spawn alone can exceed 1s while the server answers.
