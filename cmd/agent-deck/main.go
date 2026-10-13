@@ -3529,15 +3529,8 @@ type statusCounts struct {
 	total   int
 }
 
-// countByStatus counts sessions by their status
-func countByStatus(instances []*session.Instance) statusCounts {
-	return countByStatusEach(instances, nil)
-}
-
-// countByStatusEach refreshes and counts the visible sessions in one pass.
-// each, when set, sees every counted session after its refresh and before its
-// status is counted, so per-row output and counts describe the same frame.
-func countByStatusEach(instances []*session.Instance, each func(*session.Instance)) statusCounts {
+// countByStatus calls each after a session refresh and before counting it, so rows match counts.
+func countByStatus(instances []*session.Instance, each func(*session.Instance)) statusCounts {
 	// Warm tmux pane-title cache + load hook statuses so `status`/`status --json`
 	// reports the same counts the TUI and /api/menu do (issue #610).
 	session.RefreshInstancesForCLIStatus(instances)
@@ -3692,11 +3685,12 @@ func handleStatus(profile string, args []string) {
 		Total    int                 `json:"total"`
 		Sessions []statusSessionJSON `json:"sessions,omitempty"`
 	}
-	// The verbose JSON rows are built in the counting pass so counts and rows
-	// come from one refresh of the same visible set.
+	// Verbose rows read the substate in the counting pass: it can settle the status counted.
 	var rows []statusSessionJSON
+	substates := make(map[*session.Instance]session.Substate)
 	var collectRow func(*session.Instance)
-	if *jsonOutput && (*verbose || *verboseShort) {
+	switch {
+	case *jsonOutput && (*verbose || *verboseShort):
 		collectRow = func(inst *session.Instance) {
 			substate := string(inst.Substate()) // before Status: see buildListJSON
 			sj := statusSessionJSON{
@@ -3717,8 +3711,10 @@ func handleStatus(profile string, args []string) {
 			}
 			rows = append(rows, sj)
 		}
+	case *verbose || *verboseShort:
+		collectRow = func(inst *session.Instance) { substates[inst] = inst.Substate() }
 	}
-	counts := countByStatusEach(instances, collectRow)
+	counts := countByStatus(instances, collectRow)
 
 	// Output based on flags
 	if *jsonOutput {
@@ -3755,7 +3751,7 @@ func handleStatus(profile string, args []string) {
 					path = "~" + path[len(home):]
 				}
 				suffix := ""
-				if lbl := SubstateLabel(inst.Substate()); lbl != "" {
+				if lbl := SubstateLabel(substates[inst]); lbl != "" {
 					if work := inst.BackgroundWork(); work.InFlight() {
 						lbl += ": " + work.Summary() // issue #2473
 					}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
 	"github.com/asheshgoplani/agent-deck/internal/testutil"
 	"github.com/asheshgoplani/agent-deck/tests/eval/harness"
@@ -55,8 +56,7 @@ func listPerfFixture(t *testing.T) (*harness.Sandbox, []string, string) {
 	return sessionFixture(t, 100, 0)
 }
 
-// sessionFixture seeds codex then opencode sessions behind counting tmux and
-// opencode fakes; opencode calls land in $HOME/opencode-calls.
+// sessionFixture seeds codex then opencode sessions behind recording tmux and opencode fakes.
 func sessionFixture(t *testing.T, codex, opencode int) (*harness.Sandbox, []string, string) {
 	t.Helper()
 	sb := harness.NewSandbox(t)
@@ -154,11 +154,10 @@ func runListFixture(t *testing.T, sb *harness.Sandbox, env []string) {
 	}
 }
 
-// status only counts, so it must read live status without native-session
-// discovery or tmux environment traffic, and -v must reuse the counting pass.
+// status must count without session discovery, and -v must reuse the counting pass.
 func TestStatusJSON_NoSessionDiscovery(t *testing.T) {
-	plain := runStatusFixture(t, "--json")
-	verbose := runStatusFixture(t, "--json", "-v")
+	plain := runStatusFixture(t, false)
+	verbose := runStatusFixture(t, true)
 	t.Logf("tmux calls: --json=%d --json -v=%d (%d sessions)", plain, verbose, statusFixtureSessions)
 	// -v adds one substate pane capture per row on top of the counting pass.
 	if verbose > plain+statusFixtureSessions {
@@ -170,8 +169,12 @@ const statusFixtureCodex, statusFixtureOpenCode = 8, 2
 const statusFixtureSessions = statusFixtureCodex + statusFixtureOpenCode
 
 // runStatusFixture runs status against a fresh fixture and returns its tmux call count.
-func runStatusFixture(t *testing.T, args ...string) int {
+func runStatusFixture(t *testing.T, verbose bool) int {
 	t.Helper()
+	args := []string{"--json"}
+	if verbose {
+		args = append(args, "-v")
+	}
 	sb, env, calls := sessionFixture(t, statusFixtureCodex, statusFixtureOpenCode)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -192,7 +195,7 @@ func runStatusFixture(t *testing.T, args ...string) int {
 	if resp.Total != statusFixtureSessions || resp.Running != resp.Total {
 		t.Errorf("status %v running=%d total=%d, want %d/%d from live panes", args, resp.Running, resp.Total, statusFixtureSessions, statusFixtureSessions)
 	}
-	if len(args) > 1 && len(resp.Sessions) != resp.Total {
+	if verbose && len(resp.Sessions) != resp.Total {
 		t.Errorf("status %v sessions=%d, total=%d; rows and counts must cover the same set", args, len(resp.Sessions), resp.Total)
 	}
 	data, err := os.ReadFile(calls)
@@ -209,4 +212,16 @@ func runStatusFixture(t *testing.T, args ...string) int {
 		t.Errorf("status %v ran opencode:\n%s", args, oc)
 	}
 	return strings.Count(log, "\n")
+}
+
+func TestCountByStatusCountsAfterEach(t *testing.T) {
+	inst := &session.Instance{ID: "settled", Status: session.StatusWaiting}
+	var seen session.Status
+	counts := countByStatus([]*session.Instance{inst}, func(i *session.Instance) {
+		i.Status = session.StatusRunning
+		seen = i.Status
+	})
+	if counts.running != 1 || counts.waiting != 0 || seen != session.StatusRunning {
+		t.Fatalf("counts=%+v seen=%v, want the status each settled counted as running", counts, seen)
+	}
 }
