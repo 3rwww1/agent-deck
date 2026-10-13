@@ -243,8 +243,7 @@ func IsServerAlive() bool {
 	}
 	serverAliveMu.RUnlock()
 
-	// Quick probe: 1-second timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
 	defer cancel()
 	out, err := commandCombinedOutput(tmuxExecContext(ctx, DefaultSocketName(), "list-sessions", "-F", "#{session_name}"))
 	alive := err == nil || (!strings.Contains(string(out), "server exited") &&
