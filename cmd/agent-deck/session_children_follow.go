@@ -84,8 +84,9 @@ const (
 // fresh hook is the hook fast path (no tmux call) and otherwise the cached
 // status pass every CLI surface makes. Hook handlers use this.
 func buildChildRows(kids []*session.Instance, sampling childRowsSampling) []childRow {
-	rows := make([]childRow, 0, len(kids))
-	for _, k := range kids {
+	rows := make([]childRow, len(kids))
+	for _, i := range session.LiveFirstOrder(kids) {
+		k := kids[i]
 		_ = k.UpdateStatus()
 		if sampling == sampleChildPanes {
 			_ = k.Substate() // before Status: see buildListJSON
@@ -98,7 +99,7 @@ func buildChildRows(kids []*session.Instance, sampling childRowsSampling) []chil
 				row.DoneAt = e.FinishedAt.Format(time.RFC3339)
 			}
 		}
-		rows = append(rows, row)
+		rows[i] = row
 	}
 	return rows
 }
