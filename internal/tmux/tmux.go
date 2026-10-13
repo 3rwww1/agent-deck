@@ -231,10 +231,11 @@ var (
 	serverAliveVal      = true
 	serverAliveTime     time.Time
 	serverAliveTimeouts int
+	serverAliveProbes   int // completed probes, so overlapping timeouts count once
 )
 
 // IsServerAlive returns whether the tmux server was recently reachable.
-// Result is cached for 5 seconds to avoid redundant checks.
+// A verdict is cached for 5 seconds, except that a first timeout on an alive server is re-probed at once.
 func IsServerAlive() bool {
 	serverAliveMu.RLock()
 	if !serverAliveTime.IsZero() && time.Since(serverAliveTime) < 5*time.Second {
@@ -242,6 +243,7 @@ func IsServerAlive() bool {
 		serverAliveMu.RUnlock()
 		return alive
 	}
+	probesBefore := serverAliveProbes
 	serverAliveMu.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
@@ -253,10 +255,14 @@ func IsServerAlive() bool {
 	switch {
 	case err != nil && ctx.Err() == context.DeadlineExceeded:
 		// Only a hung or loaded server times out, so death needs two timeouts in a row.
-		serverAliveTimeouts++
-		serverAliveTime = time.Time{}
+		if serverAliveProbes == probesBefore {
+			serverAliveTimeouts++
+		}
 		if serverAliveTimeouts >= 2 {
 			serverAliveVal = false
+		}
+		serverAliveTime = time.Time{}
+		if !serverAliveVal {
 			serverAliveTime = time.Now()
 		}
 		alive = serverAliveVal
@@ -268,6 +274,7 @@ func IsServerAlive() bool {
 		serverAliveVal = alive
 		serverAliveTime = time.Now()
 	}
+	serverAliveProbes++
 	serverAliveMu.Unlock()
 
 	if !alive {
@@ -3309,7 +3316,7 @@ func (s *Session) Exists() bool {
 	}
 
 	if onDefaultSocket {
-		sessionCacheGate.refreshIfStale(RefreshSessionCache)
+		s.refreshStaleCache(&sessionCacheGate, RefreshSessionCache)
 		if exists, cacheValid := sessionExistsFromCache(s.Name); cacheValid && exists {
 			return true
 		}
@@ -3387,16 +3394,17 @@ func (s *Session) ExistsCached() bool {
 	return false
 }
 
-// IsPaneDead returns true if the session's pane process has exited.
-// Uses the cached pane info (refreshed once per tick) for zero-cost lookups.
-// Falls back to a direct tmux query of the primary pane to avoid false
-// positives in multi-pane layouts.
 // refreshStaleCache skips sessions on other sockets: the shared caches describe the default server only.
 func (s *Session) refreshStaleCache(gate *cacheRefreshGate, refresh func()) {
 	if strings.TrimSpace(s.SocketName) == DefaultSocketName() {
 		gate.refreshIfStale(refresh)
 	}
 }
+
+// IsPaneDead returns true if the session's pane process has exited.
+// Uses the cached pane info (refreshed once per tick) for zero-cost lookups.
+// Falls back to a direct tmux query of the primary pane to avoid false
+// positives in multi-pane layouts.
 
 func (s *Session) IsPaneDead() bool {
 	s.refreshStaleCache(&paneCacheGate, RefreshPaneInfoCache)

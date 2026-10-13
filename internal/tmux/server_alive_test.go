@@ -3,6 +3,7 @@ package tmux
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -84,5 +85,45 @@ func TestIsServerAlive_ExplicitDeadOutputIsDead(t *testing.T) {
 				t.Fatal("explicit dead output waited for the timeout")
 			}
 		})
+	}
+}
+
+func TestIsServerAlive_OverlappingTimeoutsCountOnce(t *testing.T) {
+	shortPollTimeout(t)
+	installServerAliveFake(t, "exec sleep 30")
+	var wg sync.WaitGroup
+	results := make([]bool, 2)
+	for k := range results {
+		wg.Add(1)
+		go func(k int) {
+			defer wg.Done()
+			results[k] = IsServerAlive()
+		}(k)
+	}
+	wg.Wait()
+	if !results[0] || !results[1] {
+		t.Fatalf("two overlapping timeouts = %v, want both alive (one hang episode)", results)
+	}
+	if IsServerAlive() {
+		t.Fatal("a second sequential timeout did not declare the server dead")
+	}
+}
+
+func TestIsServerAlive_DeadVerdictStaysCachedThroughTimeout(t *testing.T) {
+	shortPollTimeout(t)
+	installServerAliveFake(t, "echo 'lost server' >&2; exit 1")
+	if IsServerAlive() {
+		t.Fatal("lost server read alive")
+	}
+	writeFakeTmux(t, t.TempDir(), "exec sleep 30\n")
+	serverAliveMu.Lock()
+	serverAliveTime = time.Time{}
+	serverAliveMu.Unlock()
+	if IsServerAlive() {
+		t.Fatal("timeout after a dead verdict read alive")
+	}
+	start := time.Now()
+	if IsServerAlive() || time.Since(start) > 100*time.Millisecond {
+		t.Fatal("dead verdict was re-probed instead of cached")
 	}
 }

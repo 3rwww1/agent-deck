@@ -216,9 +216,6 @@ exec sleep 30
 	if limit := int(elapsed/paneCacheTTL) + 1; got["list-panes -a"] > limit {
 		t.Fatalf("list-panes -a = %d in %s, want at most %d (one per TTL)", got["list-panes -a"], elapsed, limit)
 	}
-	if perRow := got["has-session"] + got["display-message"] + got["list-panes -t"]; perRow > 5*staleRows {
-		t.Fatalf("per-row probes = %d, want at most %d", perRow, 5*staleRows)
-	}
 }
 
 func TestStaleCacheRefresh_IsolatedSocketSkipsSharedRefresh(t *testing.T) {

@@ -26,15 +26,18 @@ func (g *cacheRefreshGate) reset() {
 }
 
 // refreshIfStale takes the refresher as an argument because the refresher marks the gate.
-// Concurrent readers queue behind one refresh, which is cheaper than each probing.
 func (g *cacheRefreshGate) refreshIfStale(refresh func()) {
-	if !g.warm.Load() || !g.stale() {
+	if !g.warm.Load() || g.backingOff() || !g.stale() {
 		return
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.stale() || time.Since(time.Unix(0, g.failedAt.Load())) < g.ttl {
+	if g.backingOff() || !g.stale() {
 		return
 	}
 	refresh()
+}
+
+func (g *cacheRefreshGate) backingOff() bool {
+	return time.Since(time.Unix(0, g.failedAt.Load())) < g.ttl
 }
