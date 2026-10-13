@@ -170,7 +170,7 @@ func TestStatusJSON_NoSessionDiscovery(t *testing.T) {
 			}
 		}
 	}
-	// list-* calls are the refresh. Per-row probes (capture-pane, has-session) are the substate reads.
+	// list-* calls are the refresh and answer pane existence. capture-pane is the per-row substate read.
 	captures := func(calls []string) (n int, refresh []string) {
 		for _, c := range calls {
 			switch {
@@ -182,8 +182,10 @@ func TestStatusJSON_NoSessionDiscovery(t *testing.T) {
 		}
 		return n, refresh
 	}
-	if p, v := countCalls(plain, "has-session"), countCalls(verbose, "has-session"); p != v {
-		t.Errorf("has-session: --json=%d, --json -v=%d, want equal", p, v)
+	for name, calls := range map[string][]string{"--json": plain, "--json -v": verbose, "-q -v": quietVerbose} {
+		if n := countCalls(calls, "has-session"); n != 0 {
+			t.Errorf("status %s made %d has-session calls, want 0: the list-* refresh answers existence", name, n)
+		}
 	}
 	plainCaptures, plainRest := captures(plain)
 	verboseCaptures, verboseRest := captures(verbose)
@@ -218,13 +220,32 @@ func TestStatusJSON_HookRebindWritesOnce(t *testing.T) {
 }
 
 func TestCountByStatusWithSubstates(t *testing.T) {
-	insts := []*session.Instance{{ID: "a"}, {ID: "b"}}
-	if counts, subs := countByStatus(insts, false); subs != nil || counts.total != 2 {
-		t.Fatalf("without substates: counts=%+v subs=%v, want total=2 and nil map", counts, subs)
+	newInsts := func() []*session.Instance {
+		return []*session.Instance{{ID: "e"}, {ID: "q", Status: session.StatusQueued}}
 	}
-	counts, subs := countByStatus(insts, true)
-	if counts.total != 2 || len(subs) != 2 {
-		t.Fatalf("with substates: counts=%+v subs=%d, want one per counted session", counts, len(subs))
+	if counts, subs := countByStatus(newInsts(), nil); subs != nil || counts.total != 2 {
+		t.Fatalf("no substates: counts=%+v subs=%v, want total=2 and nil map", counts, subs)
+	}
+	insts := newInsts()
+	counts, subs := countByStatus(insts, anyStatus)
+	if counts.total != 2 || len(subs) != 2 || subs[insts[0]] != session.SubstateNone || subs[insts[1]] != session.SubstateNone {
+		t.Fatalf("all statuses: counts=%+v subs=%v, want SubstateNone for both pane-less sessions", counts, subs)
+	}
+	insts = newInsts()
+	counts, subs = countByStatus(insts, printedByTextVerbose)
+	if _, read := subs[insts[1]]; counts.total != 2 || len(subs) != 1 || read {
+		t.Fatalf("text -v: counts=%+v subs=%v, want only the pane-less error row read, not the queued one", counts, subs)
+	}
+}
+
+// Text -v prints no starting row, so it must not capture that pane.
+func TestStatusVerbose_SkipsUnprintedSubstates(t *testing.T) {
+	hook := fmt.Sprintf(`{"status":"starting","event":"SessionStart","ts":%d}`, time.Now().Unix())
+	calls := runStatusFixture(t, []string{"claude", "claude"}, map[string]string{"list-perf-000": hook}, "-v")
+	captures := countCalls(calls, "capture-pane")
+	t.Logf("text -v capture-pane calls=%d (1 starting, 1 running)", captures)
+	if captures != 1 {
+		t.Errorf("text -v capture-pane calls=%d, want 1: the starting row is never printed", captures)
 	}
 }
 

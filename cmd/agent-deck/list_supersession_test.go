@@ -50,7 +50,7 @@ func TestCountByStatusMatchesListTotal(t *testing.T) {
 		t.Fatalf("precondition: list --json set = %d, want 2 (source hidden)", len(listVisible))
 	}
 
-	counts, _ := countByStatus(all, false)
+	counts, _ := countByStatus(all, nil)
 	if counts.total != len(listVisible) {
 		t.Fatalf("status --json total = %d, list --json total = %d; they must agree (source %q leaked into the count)", counts.total, len(listVisible), source.ID)
 	}

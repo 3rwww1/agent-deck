@@ -3530,8 +3530,19 @@ type statusCounts struct {
 	total   int
 }
 
-// countByStatus optionally returns each counted substate, read before the status it can settle.
-func countByStatus(instances []*session.Instance, withSubstates bool) (statusCounts, map[*session.Instance]session.Substate) {
+func anyStatus(session.Status) bool { return true }
+
+// printedByTextVerbose lists the groups text `status -v` prints, so no other row pays for a pane capture.
+func printedByTextVerbose(s session.Status) bool {
+	switch s {
+	case session.StatusWaiting, session.StatusRunning, session.StatusIdle, session.StatusStopped, session.StatusError:
+		return true
+	}
+	return false
+}
+
+// countByStatus returns the substate of each session wantSubstate accepts, read before the status it can settle.
+func countByStatus(instances []*session.Instance, wantSubstate func(session.Status) bool) (statusCounts, map[*session.Instance]session.Substate) {
 	// Warm tmux pane-title cache + load hook statuses so `status`/`status --json`
 	// reports the same counts the TUI and /api/menu do (issue #610).
 	session.RefreshInstancesForCLIStatus(instances)
@@ -3544,12 +3555,12 @@ func countByStatus(instances []*session.Instance, withSubstates bool) (statusCou
 	var pass session.StatusUpdatePass
 	var counts statusCounts
 	var substates map[*session.Instance]session.Substate
-	if withSubstates {
+	if wantSubstate != nil {
 		substates = make(map[*session.Instance]session.Substate, len(instances))
 	}
 	for _, inst := range instances {
 		_ = pass.UpdateStatusOnly(inst)
-		if withSubstates {
+		if wantSubstate != nil && wantSubstate(inst.Status) {
 			substates[inst] = inst.Substate()
 		}
 		switch inst.Status {
@@ -3691,7 +3702,14 @@ func handleStatus(profile string, args []string) {
 	}
 	// Quiet text output prints only the waiting count, so it needs no per-row substate.
 	showRows := (*verbose || *verboseShort) && (*jsonOutput || !(*quiet || *quietShort))
-	counts, substates := countByStatus(instances, showRows)
+	var wantSubstate func(session.Status) bool
+	switch {
+	case showRows && *jsonOutput:
+		wantSubstate = anyStatus
+	case showRows:
+		wantSubstate = printedByTextVerbose
+	}
+	counts, substates := countByStatus(instances, wantSubstate)
 	var rows []statusSessionJSON
 	if *jsonOutput && showRows {
 		for _, inst := range instances {
