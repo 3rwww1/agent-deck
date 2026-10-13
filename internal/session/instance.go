@@ -734,6 +734,8 @@ type Instance struct {
 	// Used to skip expensive Exists() checks for ghost sessions (sessions in JSON but not in tmux)
 	// Not serialized - resets on load, but that's fine since we'll recheck on first poll
 	lastErrorCheck time.Time
+	// listedAbsent is the tmux session a listing pass last found absent; Substate skips re-probing it.
+	listedAbsent *tmux.Session
 
 	// Tiered polling: skip expensive checks for idle sessions with no activity
 	lastIdleCheck     time.Time // When we last did a full check for an idle session
@@ -6737,7 +6739,7 @@ func (i *Instance) terminatedPaneStatus() Status {
 // Because the lock is dropped, i.Status may change under us (e.g. a concurrent
 // Stop()), so the stopped-state guard is re-evaluated after reacquiring: a
 // session the user stopped mid-query must not be clobbered with error/stopped.
-func (i *Instance) applyTerminatedPaneStatus() {
+func (i *Instance) applyTerminatedPaneStatus(skipPaneProbe bool) {
 	tmuxSession := i.tmuxSession
 	tool := i.Tool
 	receiptPath := i.trackedCommandExitReceiptPath()
@@ -6746,7 +6748,7 @@ func (i *Instance) applyTerminatedPaneStatus() {
 
 	i.mu.Unlock()
 	exitCode, haveExitCode := 0, false
-	if tmuxSession != nil {
+	if tmuxSession != nil && !skipPaneProbe {
 		if paneDeadExitStatus == nil {
 			paneDeadExitStatus = tmuxSession.PaneDeadExitStatus
 		}
@@ -6867,6 +6869,32 @@ func (i *Instance) probeTmuxExists() (exists, current bool) {
 	return exists, i.tmuxSession == s && i.stopRevision == stopRevision
 }
 
+// probeTmuxExistsForPass consults a listing pass only for rows stored dead.
+func (i *Instance) probeTmuxExistsForPass(pass *StatusUpdatePass) (exists, current, trustedAbsence bool) {
+	if pass == nil || !pass.pinLiveness || (i.Status != StatusError && i.Status != StatusStopped) {
+		exists, current = i.probeTmuxExists()
+		return exists, current, false
+	}
+	s := i.tmuxSession
+	stopRevision := i.stopRevision
+	i.mu.Unlock()
+	names, ok := pass.sessionNames(s.SocketName)
+	i.mu.Lock()
+	if i.tmuxSession != s || i.stopRevision != stopRevision {
+		return false, false, false
+	}
+	if ok {
+		if _, present := names[s.Name]; present {
+			return true, true, false
+		}
+		if i.Status == StatusError || i.Status == StatusStopped {
+			return false, true, true
+		}
+	}
+	exists, current = i.probeTmuxExists()
+	return exists, current, false
+}
+
 // updateStatus refreshes i.Status from tmux, hooks and the pane. A session
 // still queued for group capacity keeps StatusQueued until its tmux pane
 // exists; a missing pane is not an error for it (issue #2526).
@@ -6878,6 +6906,7 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 	defer i.persistLastActivity(false)
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.listedAbsent = nil
 	// Short grace period for tmux initialization (not Claude startup)
 	// Use lastStartTime for accuracy on restarts, fallback to CreatedAt
 	graceTime := i.lastStartTime
@@ -6948,9 +6977,10 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 	}
 
 	// Check if tmux session exists
+	trustedAbsence := false
 	if !checkedExists {
 		var current bool
-		exists, current = i.probeTmuxExists()
+		exists, current, trustedAbsence = i.probeTmuxExistsForPass(pass)
 		if !current {
 			return nil
 		}
@@ -6971,7 +7001,11 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 			// tmux session is non-nil here, so the exit-status probe can block;
 			// applyTerminatedPaneStatus drops i.mu for the query and keeps the
 			// stopped-state guard on write.
-			i.applyTerminatedPaneStatus()
+			absentSession := i.tmuxSession
+			i.applyTerminatedPaneStatus(trustedAbsence)
+			if trustedAbsence && i.tmuxSession == absentSession {
+				i.listedAbsent = absentSession
+			}
 			// Attribute the death to authentication when the pane's last live
 			// sample showed a credential banner: the fleet-death case, which no
 			// restart can fix (see auth_hold.go). Runs regardless of the
@@ -7333,7 +7367,7 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 		// per-tool heuristic (crash → ✕ for hook tools, clean `/exit` → ■ for
 		// OpenCode). #1617, and clean one-shot completions. The probe can block,
 		// so applyTerminatedPaneStatus runs it without holding i.mu.
-		i.applyTerminatedPaneStatus()
+		i.applyTerminatedPaneStatus(false)
 	default:
 		i.Status = StatusError
 	}
@@ -12555,8 +12589,10 @@ func (i *Instance) Substate() Substate {
 	if s := i.getTerminatedPaneSubstate(); s != SubstateNone {
 		return s
 	}
-	tmuxSess := i.GetTmuxSession()
-	if tmuxSess == nil {
+	i.mu.RLock()
+	tmuxSess, listedAbsent := i.tmuxSession, i.listedAbsent
+	i.mu.RUnlock()
+	if tmuxSess == nil || tmuxSess == listedAbsent {
 		return SubstateNone
 	}
 	sub, liveSpinner := tmuxSess.GetSubstateWithLiveSpinner()

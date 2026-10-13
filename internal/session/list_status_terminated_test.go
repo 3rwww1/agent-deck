@@ -39,7 +39,7 @@ func TestCLIStatusCandidatesClassifiesAbsentErrorRows(t *testing.T) {
 		hookStatus: "waiting"})
 	noHook := absent(&Instance{ID: "hook-none", Tool: "claude", Status: StatusError})
 
-	refresh, cached := CLIStatusCandidates([]*Instance{tracked, cleanHook, noHook})
+	refresh, cached := NewListingPass().CLIStatusCandidates([]*Instance{tracked, cleanHook, noHook})
 	if len(refresh) != 0 || !cached[tracked] || !cached[cleanHook] || !cached[noHook] {
 		t.Fatalf("absent error rows must stay on the shared inventory path: refresh=%d", len(refresh))
 	}
