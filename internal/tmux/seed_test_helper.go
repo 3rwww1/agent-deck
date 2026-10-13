@@ -25,6 +25,7 @@ func ExpireToolDetectionForTest(s *Session) {
 // without standing up a real tmux server.
 func SeedPaneInfoCacheForTest(t testing.TB, info map[string]PaneInfo) {
 	t.Helper()
+	HoldCacheRefreshGatesForTest(t)
 	paneCacheMu.Lock()
 	paneCacheData = info
 	paneCacheTime = time.Now()
@@ -47,6 +48,7 @@ func SeedPaneInfoCacheForTest(t testing.TB, info map[string]PaneInfo) {
 // server.
 func SeedWindowCacheForTest(t testing.TB, windows map[string][]WindowInfo) {
 	t.Helper()
+	HoldCacheRefreshGatesForTest(t)
 	windowCacheMu.Lock()
 	windowCacheData = windows
 	windowCacheTime = time.Now()
@@ -95,6 +97,7 @@ func ExpireStartupWindowForTest(t testing.TB, s *Session) {
 // is also safe.
 func ExpirePaneInfoCacheForTest(t testing.TB) {
 	t.Helper()
+	HoldCacheRefreshGatesForTest(t)
 	paneCacheMu.Lock()
 	paneCacheTime = time.Now().Add(-1 * time.Hour)
 	paneCacheMu.Unlock()
@@ -112,8 +115,20 @@ func ResetServerAliveCacheForTest(t testing.TB) {
 		serverAliveMu.Lock()
 		serverAliveVal = true
 		serverAliveTime = time.Time{}
+		serverAliveTimeouts = 0
 		serverAliveMu.Unlock()
 	}
 	reset()
 	t.Cleanup(reset)
+}
+
+func resetCacheRefreshGatesForTest() {
+	sessionCacheGate.reset()
+	paneCacheGate.reset()
+}
+
+// HoldCacheRefreshGatesForTest stops gated readers from refreshing a seeded, expired, or test-staged cache.
+func HoldCacheRefreshGatesForTest(t testing.TB) {
+	resetCacheRefreshGatesForTest()
+	t.Cleanup(resetCacheRefreshGatesForTest)
 }
