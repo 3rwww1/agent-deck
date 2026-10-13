@@ -242,10 +242,9 @@ func TestCountByStatusWithSubstates(t *testing.T) {
 func TestStatusVerbose_SkipsUnprintedSubstates(t *testing.T) {
 	hook := fmt.Sprintf(`{"status":"starting","event":"SessionStart","ts":%d}`, time.Now().Unix())
 	calls := runStatusFixture(t, []string{"claude", "claude"}, map[string]string{"list-perf-000": hook}, "-v")
-	captures := countCalls(calls, "capture-pane")
-	t.Logf("text -v capture-pane calls=%d (1 starting, 1 running)", captures)
-	if captures != 1 {
-		t.Errorf("text -v capture-pane calls=%d, want 1: the starting row is never printed", captures)
+	t.Logf("text -v capture-pane calls=%d (1 starting, 1 running)", countCalls(calls, "capture-pane"))
+	if n := countCalls(calls, "capture-pane", "agentdeck_list-perf-000"); n != 0 {
+		t.Errorf("text -v captured the starting pane %d times, want 0: that row is never printed", n)
 	}
 }
 
@@ -285,7 +284,7 @@ func runStatusFixture(t *testing.T, tools []string, hooks map[string]string, arg
 	if err != nil {
 		t.Fatalf("status %v: %v\n%s", args, err, out)
 	}
-	if args[0] == "--json" {
+	if slices.Contains(args, "--json") {
 		var resp struct {
 			Error    int               `json:"error"`
 			Stopped  int               `json:"stopped"`

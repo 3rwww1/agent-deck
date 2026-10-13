@@ -3677,14 +3677,9 @@ func handleStatus(profile string, args []string) {
 		Model        string `json:"model,omitempty"`
 		ModelVersion string `json:"model_version,omitempty"`
 		Status       string `json:"status"`
-		// Substate is the additive Honest-Status-v2 refinement
-		// (model-unavailable, auth-401, idle-at-empty-prompt, running).
-		// ADDED, never renamed: existing fields stay byte-stable; omitempty
-		// so the default "" never appears in output.
-		Substate string `json:"substate,omitempty"`
-		ExitCode *int   `json:"exit_code,omitempty"`
-		// SubstateDetail is free text for the substate (today the codex
-		// usage-limit retry time). Same omitempty contract.
+		// Added, never renamed: omitempty keeps existing output byte-stable.
+		Substate       string `json:"substate,omitempty"`
+		ExitCode       *int   `json:"exit_code,omitempty"`
 		SubstateDetail string `json:"substate_detail,omitempty"`
 		Path           string `json:"path"`
 
