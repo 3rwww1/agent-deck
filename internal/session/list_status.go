@@ -52,32 +52,17 @@ func (p *StatusUpdatePass) sessionNames(socket string) (map[string]struct{}, boo
 func (p *StatusUpdatePass) listSessionNames(socket string) (map[string]struct{}, bool) {
 	key := strings.TrimSpace(socket)
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if names, ok := p.liveNames[key]; ok {
-		p.mu.Unlock()
 		return names, names != nil
 	}
-	if ready := p.liveLoading[key]; ready != nil {
-		p.mu.Unlock()
-		<-ready
-		return p.listSessionNames(key)
-	}
-	if p.liveLoading == nil {
-		p.liveLoading = make(map[string]chan struct{})
-	}
-	ready := make(chan struct{})
-	p.liveLoading[key] = ready
-	p.mu.Unlock()
 	names, err := tmux.ListSessionNamesOnSocket(key)
 	if err != nil {
 		names = nil
 	}
-	p.mu.Lock()
 	if p.liveNames == nil {
 		p.liveNames = make(map[string]map[string]struct{})
 	}
 	p.liveNames[key] = names
-	delete(p.liveLoading, key)
-	close(ready)
-	p.mu.Unlock()
 	return names, names != nil
 }

@@ -18,8 +18,7 @@ import (
 
 const deadFixtureErrors, deadFixtureStopped = 20, 5
 
-// deadListFixture: stored-dead rows behind a counting fake. Modes: indeterminate
-// fails list-sessions, foreign runs inside another server that hides the default one.
+// deadListFixture modes: "indeterminate" fails list-sessions, "foreign" sets $TMUX elsewhere.
 func deadListFixture(t *testing.T, mode string) (*harness.Sandbox, []string, string) {
 	t.Helper()
 	sb := harness.NewSandbox(t)
@@ -171,8 +170,7 @@ func paneDeadProbes(log string) int {
 	return n
 }
 
-// Stored-dead rows absent from a complete listing cost O(sockets), not 2N,
-// and report exactly what the per-session path reports.
+// Absent stored-dead rows cost O(sockets), not 2N, with per-session output.
 func TestListJSON_DeadRowsTrustTheListing(t *testing.T) {
 	got := runDeadList(t, "")
 	perRow := runDeadList(t, "indeterminate")
@@ -223,8 +221,7 @@ func TestListJSON_DeadRowsTrustTheListing(t *testing.T) {
 	}
 }
 
-// Inside another tmux server, socket-less rows absent from the listing keep
-// their stored status when the default server still has them.
+// Inside another tmux server, unlisted socket-less rows keep their stored status.
 func TestListJSON_ForeignServerKeepsStatus(t *testing.T) {
 	got := runDeadList(t, "foreign")
 	for id, want := range map[string]string{"live-run": "running", "dead-err-01": "error"} {

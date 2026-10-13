@@ -158,7 +158,8 @@ func staticSessionRow(inst *session.Instance, instances []*session.Instance, pro
 func liveSessionRows(ctx context.Context, profile string, instances []*session.Instance, cached map[*session.Instance]bool, transcripts map[*session.Instance]string, pass *session.StatusUpdatePass) []SessionRow {
 	rows := make([]SessionRow, len(instances))
 	viewers := session.ViewersByTmuxSession(ctx, instances)
-	for i, inst := range instances {
+	for _, i := range session.LiveFirstOrder(instances) {
+		inst := instances[i]
 		// Listings need live status, not native-session discovery.
 		if !cached[inst] {
 			_ = pass.UpdateStatusOnly(inst)

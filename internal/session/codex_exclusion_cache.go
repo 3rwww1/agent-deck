@@ -44,8 +44,7 @@ type StatusUpdatePass struct {
 	bySocket map[string]codexOwnershipSnapshot
 	loading  map[string]chan struct{}
 	// Guarded by mu: one socket listing per pass, nil when indeterminate.
-	liveNames   map[string]map[string]struct{}
-	liveLoading map[string]chan struct{}
+	liveNames map[string]map[string]struct{}
 }
 
 // UpdateStatus refreshes one instance using this pass's shared evidence.

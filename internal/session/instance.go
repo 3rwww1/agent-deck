@@ -6672,9 +6672,10 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 			// tmux session is non-nil here, so the exit-status probe can block;
 			// applyTerminatedPaneStatus drops i.mu for the query and keeps the
 			// stopped-state guard on write.
+			absentSession := i.tmuxSession
 			i.applyTerminatedPaneStatus(trustedAbsence)
-			if trustedAbsence {
-				i.listedAbsent = i.tmuxSession
+			if trustedAbsence && i.tmuxSession == absentSession {
+				i.listedAbsent = absentSession
 			}
 			// Attribute the death to authentication when the pane's last live
 			// sample showed a credential banner: the fleet-death case, which no

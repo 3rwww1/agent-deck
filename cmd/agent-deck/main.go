@@ -3063,7 +3063,8 @@ func buildListJSONWithPass(profileName string, instances []*session.Instance, ca
 	sessions := make([]sessionJSON, len(instances))
 	transcripts := session.ListedTranscriptPaths(instances)
 	viewers := session.ViewersByTmuxSession(context.Background(), instances)
-	for i, inst := range instances {
+	for _, i := range session.LiveFirstOrder(instances) {
+		inst := instances[i]
 		// Listings need live status, not native-session discovery. Persisted
 		// rows have no status freshness stamp, so still validate liveness.
 		if !cached[inst] {

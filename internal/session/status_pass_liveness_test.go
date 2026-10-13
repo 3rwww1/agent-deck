@@ -14,8 +14,7 @@ import (
 
 var livenessSocketSeq atomic.Int64
 
-// livenessSocket returns a private -L socket under the isolated TMUX_TMPDIR,
-// killed at cleanup.
+// livenessSocket returns a private -L socket under the isolated TMUX_TMPDIR.
 func livenessSocket(t *testing.T) string {
 	t.Helper()
 	skipIfNoTmuxBinary(t)
@@ -53,8 +52,7 @@ func livenessRow(name, sock string, status Status) *Instance {
 	return inst
 }
 
-// spawns counts tmux subprocesses started while fn runs, after one warm-up
-// refresh so a shared cache reload is not charged to fn.
+// spawns warms up once first so a shared cache reload is not charged to fn.
 func spawns(sock string, fn func()) int64 {
 	_ = livenessRow("warmup", sock, StatusError).UpdateStatus()
 	before := tmux.SubprocessStarts()
@@ -127,8 +125,7 @@ func TestStatusPassLiveness_NilAndZeroPassUnchanged(t *testing.T) {
 	}
 }
 
-// A session on socket B is absent from A's listing: keyed on its own socket,
-// it is present and refreshed, never trusted dead.
+// A session on socket B is judged by B's listing, never by A's.
 func TestStatusPassLiveness_KeyedBySocket(t *testing.T) {
 	sockA, sockB := livenessSocket(t), livenessSocket(t)
 	startLivenessSession(t, sockA, "only-on-a")
@@ -212,8 +209,7 @@ func TestStatusPassLiveness_StoredDeadReappears(t *testing.T) {
 	}
 }
 
-// Sessions created after the snapshot: live and grace rows are probed
-// directly, a stored-error row keeps its stored status for this pass.
+// After the snapshot, live and grace rows are probed, a stored-error row stays error.
 func TestStatusPassLiveness_CreatedAfterSnapshot(t *testing.T) {
 	sock := livenessSocket(t)
 	startLivenessSession(t, sock, "keepalive")
@@ -241,8 +237,7 @@ func TestStatusPassLiveness_CreatedAfterSnapshot(t *testing.T) {
 	}
 }
 
-// Skipping the pane probe changes no verdict: the hook-status error->stopped
-// rule and the unknown-exit substate match the unpinned path.
+// Skipping the pane probe changes no verdict versus the unpinned path.
 func TestStatusPassLiveness_OutputParity(t *testing.T) {
 	sock := livenessSocket(t)
 	startLivenessSession(t, sock, "keepalive")
@@ -268,8 +263,7 @@ func TestStatusPassLiveness_OutputParity(t *testing.T) {
 	}
 }
 
-// The snapshot outlives the 2 s session cache: a dead tail reached after the
-// cache expires still costs zero spawns.
+// A dead tail reached after the 2 s session cache expires still costs zero spawns.
 func TestStatusPassLiveness_DeadTailAfterCacheExpiry(t *testing.T) {
 	sock := livenessSocket(t)
 	startLivenessSession(t, sock, "keepalive")
