@@ -146,14 +146,16 @@ func TestStaleCacheRefresh_DeadServerTriesOncePerTTL(t *testing.T) {
 	expireSharedCaches()
 	_ = callCounts(t, dir)
 
+	start := time.Now()
 	for k := 0; k < staleRows; k++ {
 		readLiveRow(staleSession(k))
 	}
+	elapsed := time.Since(start)
 
 	got := callCounts(t, dir)
-	t.Logf("%d rows with the server down: %v", staleRows, got)
-	if got["list-windows"] > 1 || got["list-panes -a"] > 1 {
-		t.Fatalf("calls = %v, want at most one list-windows and one list-panes -a per TTL", got)
+	t.Logf("%d rows with the server down in %s: %v", staleRows, elapsed, got)
+	if limit := int(elapsed/sessionCacheTTL) + 1; got["list-windows"] > limit || got["list-panes -a"] > limit {
+		t.Fatalf("calls = %v in %s, want at most %d of each listing (one per TTL)", got, elapsed, limit)
 	}
 }
 
@@ -181,9 +183,7 @@ func TestStaleCacheRefresh_ConcurrentReadersSingleFlight(t *testing.T) {
 	}
 }
 
-// After one timeout the server still reads alive, so one sweep runs against a
-// hung server. Bound what it spawns: one listing per cache per TTL plus each
-// row's own probes, never a listing per row.
+// One timeout still reads alive, so one sweep runs against a hung server: bound its listings.
 func TestStaleCacheRefresh_HungServerSweepCost(t *testing.T) {
 	dir := installStaleCacheFake(t)
 	RefreshSessionCache()
@@ -218,5 +218,22 @@ exec sleep 30
 	}
 	if perRow := got["has-session"] + got["display-message"] + got["list-panes -t"]; perRow > 5*staleRows {
 		t.Fatalf("per-row probes = %d, want at most %d", perRow, 5*staleRows)
+	}
+}
+
+func TestStaleCacheRefresh_IsolatedSocketSkipsSharedRefresh(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	RefreshSessionCache()
+	RefreshPaneInfoCache()
+	expireSharedCaches()
+	_ = callCounts(t, dir)
+
+	s := &Session{Name: "stale-0", SocketName: "t8-isolated"}
+	readLiveRow(s)
+	_, _ = s.GetStatus()
+
+	got := callCounts(t, dir)
+	if got["list-windows"] != 0 || got["list-panes -a"] != 0 {
+		t.Fatalf("isolated-socket row calls = %v, want no default-server listing", got)
 	}
 }

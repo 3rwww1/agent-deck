@@ -6,13 +6,7 @@ import (
 	"time"
 )
 
-// cacheRefreshGate turns a stale shared cache into one refresh per TTL for
-// every per-row reader, instead of one direct tmux probe per row.
-//
-// It stays shut until the process has refreshed the cache once: a one-shot
-// command that never warmed a cache keeps its single direct probe rather than
-// paying a fleet-wide listing. A failed refresh shuts it for one TTL, so a
-// dead server costs one bounded listing per TTL, not one per row.
+// cacheRefreshGate gives per-row readers one shared refresh per TTL, only after a first refresh in the process.
 type cacheRefreshGate struct {
 	ttl   time.Duration
 	stale func() bool
@@ -32,6 +26,7 @@ func (g *cacheRefreshGate) reset() {
 }
 
 // refreshIfStale takes the refresher as an argument because the refresher marks the gate.
+// Concurrent readers queue behind one refresh, which is cheaper than each probing.
 func (g *cacheRefreshGate) refreshIfStale(refresh func()) {
 	if !g.warm.Load() || !g.stale() {
 		return

@@ -178,8 +178,8 @@ func RefreshPaneInfoCache() {
 		tmuxFmt("#{session_name}", "#{pane_current_command}", "#{pane_dead}", "#{window_index}", "#{pane_index}", "#{pane_title}"))
 	output, err := commandOutput(cmd)
 	if err != nil {
-		statusLog.Debug("pane_cache_refresh_failed", "error", err)
 		paneCacheGate.markFailed()
+		statusLog.Debug("pane_cache_refresh_failed", "error", err)
 		return
 	}
 
@@ -357,7 +357,7 @@ func containsDoneMarker(s string) bool {
 
 const paneCacheTTL = 4 * time.Second
 
-// paneCacheStale reports whether the pane cache is past TTL or empty. Caller must hold paneCacheMu.
+// Caller must hold paneCacheMu.
 func paneCacheStale() bool {
 	return paneCacheData == nil || time.Since(paneCacheTime) > paneCacheTTL
 }

@@ -252,8 +252,7 @@ func IsServerAlive() bool {
 	var alive bool
 	switch {
 	case err != nil && ctx.Err() == context.DeadlineExceeded:
-		// A dead server fails fast, a loaded one can time out: keep the last
-		// verdict, re-probe on the next call, and go dead on a second timeout.
+		// Only a hung or loaded server times out, so death needs two timeouts in a row.
 		serverAliveTimeouts++
 		serverAliveTime = time.Time{}
 		if serverAliveTimeouts >= 2 {
@@ -264,7 +263,7 @@ func IsServerAlive() bool {
 	default:
 		msg := string(out)
 		lost := strings.Contains(msg, "server exited") || strings.Contains(msg, "lost server")
-		alive = err == nil || strings.Contains(msg, "no server running") || !lost
+		alive = err == nil || !lost
 		serverAliveTimeouts = 0
 		serverAliveVal = alive
 		serverAliveTime = time.Now()
@@ -301,8 +300,6 @@ func sessionCacheStale() bool {
 	return sessionCacheData == nil || time.Since(sessionCacheTime) > sessionCacheTTL
 }
 
-// sessionCacheGate lets a per-row reader refresh a stale session cache once
-// per TTL instead of probing tmux for its own row.
 var sessionCacheGate = cacheRefreshGate{ttl: sessionCacheTTL, stale: func() bool {
 	sessionCacheMu.RLock()
 	defer sessionCacheMu.RUnlock()
@@ -350,8 +347,8 @@ func RefreshSessionCache() {
 		sessionCacheMu.Lock()
 		sessionCacheData = nil
 		sessionCacheTime = time.Time{}
-		sessionCacheMu.Unlock()
 		sessionCacheGate.markFailed()
+		sessionCacheMu.Unlock()
 		return
 	}
 
@@ -3297,8 +3294,8 @@ func (s *Session) Exists() bool {
 	// hit flipped live sessions on a second socket to StatusError/tmux_missing
 	// (multi-socket cache aliasing), after which restart machinery could kill
 	// the still-running pane.
-	if strings.TrimSpace(s.SocketName) == DefaultSocketName() {
-		sessionCacheGate.refreshIfStale(RefreshSessionCache)
+	onDefaultSocket := strings.TrimSpace(s.SocketName) == DefaultSocketName()
+	if onDefaultSocket {
 		if exists, cacheValid := sessionExistsFromCache(s.Name); cacheValid && exists {
 			return true
 		}
@@ -3307,6 +3304,13 @@ func (s *Session) Exists() bool {
 	// If PipeManager has a live control connection, the session definitely exists.
 	if pm := GetPipeManager(); pm != nil {
 		if pm.IsConnected(s.Name) {
+			return true
+		}
+	}
+
+	if onDefaultSocket {
+		sessionCacheGate.refreshIfStale(RefreshSessionCache)
+		if exists, cacheValid := sessionExistsFromCache(s.Name); cacheValid && exists {
 			return true
 		}
 	}
@@ -3387,8 +3391,15 @@ func (s *Session) ExistsCached() bool {
 // Uses the cached pane info (refreshed once per tick) for zero-cost lookups.
 // Falls back to a direct tmux query of the primary pane to avoid false
 // positives in multi-pane layouts.
+// refreshStaleCache skips sessions on other sockets: the shared caches describe the default server only.
+func (s *Session) refreshStaleCache(gate *cacheRefreshGate, refresh func()) {
+	if strings.TrimSpace(s.SocketName) == DefaultSocketName() {
+		gate.refreshIfStale(refresh)
+	}
+}
+
 func (s *Session) IsPaneDead() bool {
-	paneCacheGate.refreshIfStale(RefreshPaneInfoCache)
+	s.refreshStaleCache(&paneCacheGate, RefreshPaneInfoCache)
 	if info, ok := GetCachedPaneInfo(s.Name); ok {
 		return info.Dead
 	}
@@ -4143,7 +4154,7 @@ func wrapRespawnCommandWithResolver(command string, lookPath func(string) (strin
 // Falls back to direct tmux call if cache is stale
 func (s *Session) GetWindowActivity() (int64, error) {
 	// Try cache first (O(1) map lookup, no subprocess)
-	sessionCacheGate.refreshIfStale(RefreshSessionCache)
+	s.refreshStaleCache(&sessionCacheGate, RefreshSessionCache)
 	if activity, cacheValid := sessionActivityFromCache(s.Name); cacheValid {
 		return activity, nil
 	}
@@ -4449,6 +4460,7 @@ func (s *Session) DetectTool() string {
 	// A session created as "shell" can later launch a supported tool. Prefer the
 	// pane's current command over terminal content so conversation text that
 	// mentions another tool cannot rewrite the running tool's identity.
+	s.refreshStaleCache(&paneCacheGate, RefreshPaneInfoCache)
 	if paneInfo, ok := GetCachedPaneInfo(s.Name); ok {
 		if tool := detectToolFromCommand(paneInfo.CurrentCommand); tool != "" {
 			s.mu.Lock()
@@ -4617,7 +4629,7 @@ func (s *Session) GetStatus() (string, error) {
 	// FAST PATH: Title-based state detection for Claude Code sessions.
 	// Claude Code sets pane titles via OSC sequences: Braille spinner while working,
 	// ✳ markers when done. One character check replaces full CapturePane + content scan.
-	paneCacheGate.refreshIfStale(RefreshPaneInfoCache)
+	s.refreshStaleCache(&paneCacheGate, RefreshPaneInfoCache)
 	if paneInfo, ok := GetCachedPaneInfo(s.Name); ok {
 		titleState := AnalyzePaneTitle(paneInfo.Title, paneInfo.CurrentCommand)
 		switch titleState {

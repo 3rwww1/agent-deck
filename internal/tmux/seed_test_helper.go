@@ -14,6 +14,7 @@ import (
 // without standing up a real tmux server.
 func SeedPaneInfoCacheForTest(t testing.TB, info map[string]PaneInfo) {
 	t.Helper()
+	holdCacheRefreshGatesForTest(t)
 	paneCacheMu.Lock()
 	paneCacheData = info
 	paneCacheTime = time.Now()
@@ -36,6 +37,7 @@ func SeedPaneInfoCacheForTest(t testing.TB, info map[string]PaneInfo) {
 // server.
 func SeedWindowCacheForTest(t testing.TB, windows map[string][]WindowInfo) {
 	t.Helper()
+	holdCacheRefreshGatesForTest(t)
 	windowCacheMu.Lock()
 	windowCacheData = windows
 	windowCacheTime = time.Now()
@@ -84,6 +86,7 @@ func ExpireStartupWindowForTest(t testing.TB, s *Session) {
 // is also safe.
 func ExpirePaneInfoCacheForTest(t testing.TB) {
 	t.Helper()
+	holdCacheRefreshGatesForTest(t)
 	paneCacheMu.Lock()
 	paneCacheTime = time.Now().Add(-1 * time.Hour)
 	paneCacheMu.Unlock()
@@ -111,4 +114,10 @@ func ResetServerAliveCacheForTest(t testing.TB) {
 func resetCacheRefreshGatesForTest() {
 	sessionCacheGate.reset()
 	paneCacheGate.reset()
+}
+
+// holdCacheRefreshGatesForTest keeps a seeded or expired cache from being refreshed over by a gated reader.
+func holdCacheRefreshGatesForTest(t testing.TB) {
+	resetCacheRefreshGatesForTest()
+	t.Cleanup(resetCacheRefreshGatesForTest)
 }
