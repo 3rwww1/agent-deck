@@ -140,6 +140,7 @@ func (s *Session) GetStatus() (string, error) {
 	// FAST PATH: Title-based state detection for Claude Code sessions.
 	// Claude Code sets pane titles via OSC sequences: Braille spinner while working,
 	// ✳ markers when done. One character check replaces full CapturePane + content scan.
+	s.refreshStaleCache(&paneCacheGate, RefreshPaneInfoCache)
 	if paneInfo, ok := GetCachedPaneInfo(s.TmuxName()); ok {
 		titleState := AnalyzePaneTitle(paneInfo.Title, paneInfo.CurrentCommand)
 		switch titleState {

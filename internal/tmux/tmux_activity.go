@@ -317,8 +317,13 @@ func (s *Session) GetWindowActivity() (int64, error) {
 		return pm.GetWindowActivity(s.TmuxName())
 	}
 
+	s.refreshStaleCache(&sessionCacheGate, RefreshSessionCache)
+	if activity, cacheValid := sessionActivityFromCache(s.TmuxName()); cacheValid {
+		return activity, nil
+	}
+
 	// No PipeManager: fall back to direct check (spawns subprocess)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
 	defer cancel()
 	cmd := s.tmuxCmdContext(ctx, "display-message", "-t", s.TmuxName(), "-p", "#{window_activity}")
 	output, err := commandOutput(cmd)
