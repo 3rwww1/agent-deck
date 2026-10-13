@@ -3658,7 +3658,6 @@ func handleStatus(profile string, args []string) {
 		return
 	}
 
-	// Count by status
 	type statusSessionJSON struct {
 		ID           string `json:"id"`
 		Title        string `json:"title"`

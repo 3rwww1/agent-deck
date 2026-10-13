@@ -182,7 +182,9 @@ func TestStatusJSON_NoSessionDiscovery(t *testing.T) {
 		}
 		return n, refresh
 	}
-	t.Logf("has-session: --json=%d --json -v=%d", countCalls(plain, "has-session"), countCalls(verbose, "has-session"))
+	if p, v := countCalls(plain, "has-session"), countCalls(verbose, "has-session"); p != v {
+		t.Errorf("has-session: --json=%d, --json -v=%d, want equal", p, v)
+	}
 	plainCaptures, plainRest := captures(plain)
 	verboseCaptures, verboseRest := captures(verbose)
 	quietCaptures, _ := captures(quietVerbose)
