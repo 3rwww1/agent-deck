@@ -1,6 +1,8 @@
 package tmux
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -19,20 +21,54 @@ func TestIsServerAlive_SlowButAliveServerIsAlive(t *testing.T) {
 	}
 }
 
-func TestIsServerAlive_HungServerTimesOut(t *testing.T) {
+func shortPollTimeout(t *testing.T) {
+	t.Helper()
+	restore := tmuxPollTimeout
+	tmuxPollTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { tmuxPollTimeout = restore })
+}
+
+// One timeout is not proof of death: only two in a row are.
+func TestIsServerAlive_HungServerDeadAfterTwoTimeouts(t *testing.T) {
+	shortPollTimeout(t)
 	installServerAliveFake(t, "exec sleep 30")
+	for k, want := range []bool{true, false} {
+		start := time.Now()
+		got := IsServerAlive()
+		if elapsed := time.Since(start); elapsed < tmuxPollTimeout || elapsed > tmuxPollTimeout+2*time.Second {
+			t.Fatalf("probe %d took %s, want a fresh probe of about %s", k+1, elapsed, tmuxPollTimeout)
+		}
+		if got != want {
+			t.Fatalf("probe %d: IsServerAlive() = %v, want %v", k+1, got, want)
+		}
+	}
 	start := time.Now()
-	alive := IsServerAlive()
-	elapsed := time.Since(start)
-	if alive {
-		t.Fatal("IsServerAlive() = true for a hung server")
-	}
-	if elapsed > tmuxPollTimeout+2*time.Second {
-		t.Fatalf("hung probe took %s, want about %s", elapsed, tmuxPollTimeout)
-	}
-	start = time.Now()
 	if IsServerAlive() || time.Since(start) > 100*time.Millisecond {
 		t.Fatal("dead verdict was not cached")
+	}
+}
+
+func TestIsServerAlive_SuccessResetsTimeoutCount(t *testing.T) {
+	shortPollTimeout(t)
+	dir := t.TempDir()
+	t.Setenv("ALIVE_FIXTURE", dir)
+	writeFakeTmux(t, t.TempDir(), "[ -f \"$ALIVE_FIXTURE/hang\" ] && exec sleep 30\necho agentdeck_ok\n")
+	ResetServerAliveCacheForTest(t)
+	hang := filepath.Join(dir, "hang")
+	for k, hung := range []bool{true, false, true} {
+		if hung {
+			if err := os.WriteFile(hang, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			_ = os.Remove(hang)
+		}
+		if !IsServerAlive() {
+			t.Fatalf("probe %d (hung=%v): dead before two timeouts in a row", k+1, hung)
+		}
+		serverAliveMu.Lock()
+		serverAliveTime = time.Time{}
+		serverAliveMu.Unlock()
 	}
 }
 

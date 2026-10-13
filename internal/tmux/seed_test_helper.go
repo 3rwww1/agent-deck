@@ -101,8 +101,14 @@ func ResetServerAliveCacheForTest(t testing.TB) {
 		serverAliveMu.Lock()
 		serverAliveVal = true
 		serverAliveTime = time.Time{}
+		serverAliveTimeouts = 0
 		serverAliveMu.Unlock()
 	}
 	reset()
 	t.Cleanup(reset)
+}
+
+func resetCacheRefreshGatesForTest() {
+	sessionCacheGate.reset()
+	paneCacheGate.reset()
 }

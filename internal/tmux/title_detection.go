@@ -151,6 +151,7 @@ func updateWindowToolCache(windowTools map[string]map[int]string) {
 // Call this ONCE per tick (from backgroundStatusUpdate), then use GetCachedPaneInfo()
 // to read cached values. Tries PipeManager first, falls back to subprocess.
 func RefreshPaneInfoCache() {
+	paneCacheGate.markWarm()
 	if pm := GetPipeManager(); pm != nil {
 		if info, windowTools, err := pm.RefreshAllPaneInfo(); err == nil && len(info) > 0 {
 			paneCacheMu.Lock()
@@ -167,7 +168,7 @@ func RefreshPaneInfoCache() {
 	// Package-level probe: routes through tmuxExecContext + DefaultSocketName()
 	// so installations with [tmux].socket_name set see their isolated server
 	// (#687 follow-up, v1.7.55).
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
 	defer cancel()
 	// pane_title is free-text (apps set it via OSC) so it goes LAST; every
 	// other field is a sanitized name, integer, or 0/1 flag that cannot
@@ -178,6 +179,7 @@ func RefreshPaneInfoCache() {
 	output, err := commandOutput(cmd)
 	if err != nil {
 		statusLog.Debug("pane_cache_refresh_failed", "error", err)
+		paneCacheGate.markFailed()
 		return
 	}
 
@@ -268,7 +270,7 @@ func GetCachedPaneInfoSnapshot(sessionName string) (PaneInfo, time.Time, bool) {
 	paneCacheMu.RLock()
 	defer paneCacheMu.RUnlock()
 
-	if paneCacheData == nil || time.Since(paneCacheTime) > 4*time.Second {
+	if paneCacheStale() {
 		return PaneInfo{}, time.Time{}, false
 	}
 
@@ -352,3 +354,16 @@ func containsDoneMarker(s string) bool {
 	}
 	return false
 }
+
+const paneCacheTTL = 4 * time.Second
+
+// paneCacheStale reports whether the pane cache is past TTL or empty. Caller must hold paneCacheMu.
+func paneCacheStale() bool {
+	return paneCacheData == nil || time.Since(paneCacheTime) > paneCacheTTL
+}
+
+var paneCacheGate = cacheRefreshGate{ttl: paneCacheTTL, stale: func() bool {
+	paneCacheMu.RLock()
+	defer paneCacheMu.RUnlock()
+	return paneCacheStale()
+}}

@@ -1,0 +1,222 @@
+package tmux
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+const staleRows = 10
+
+// installStaleCacheFake serves a fleet of staleRows live sessions and logs every call.
+func installStaleCacheFake(t *testing.T) (dir string) {
+	t.Helper()
+	dir = t.TempDir()
+	t.Setenv("STALE_FIXTURE", dir)
+	var windows, panes strings.Builder
+	for k := 0; k < staleRows; k++ {
+		fmt.Fprintf(&windows, "stale-%d|100|0|@%d|w\n", k, k)
+		fmt.Fprintf(&panes, "stale-%d|claude|0|0|0|title\n", k)
+	}
+	writeStaleFixture(t, dir, "windows", windows.String())
+	writeStaleFixture(t, dir, "panes", panes.String())
+	writeFakeTmux(t, dir, `printf '%s\n' "$*" >> "$STALE_FIXTURE/calls"
+[ -f "$STALE_FIXTURE/down" ] && { echo 'no server running' >&2; exit 1; }
+[ -f "$STALE_FIXTURE/slow" ] && sleep 0.3
+case "$*" in
+*list-windows*) cat "$STALE_FIXTURE/windows";;
+*"list-panes -a"*) cat "$STALE_FIXTURE/panes";;
+*list-panes*) echo 0;;
+*display-message*) echo 100;;
+esac
+exit 0
+`)
+	resetStaleCachesForTest(t)
+	return dir
+}
+
+func writeStaleFixture(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func resetStaleCachesForTest(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		sessionCacheMu.Lock()
+		sessionCacheData, sessionCacheTime = nil, time.Time{}
+		sessionCacheMu.Unlock()
+		paneCacheMu.Lock()
+		paneCacheData, paneCacheTime = nil, time.Time{}
+		paneCacheMu.Unlock()
+		resetCacheRefreshGatesForTest()
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+// expireSharedCaches ages both caches past their TTL, as a long pass does.
+func expireSharedCaches() {
+	sessionCacheMu.Lock()
+	sessionCacheTime = time.Now().Add(-time.Hour)
+	sessionCacheMu.Unlock()
+	paneCacheMu.Lock()
+	paneCacheTime = time.Now().Add(-time.Hour)
+	paneCacheMu.Unlock()
+}
+
+// callCounts reads the fake's log, truncates it, and counts calls by verb.
+func callCounts(t *testing.T, dir string) map[string]int {
+	t.Helper()
+	path := filepath.Join(dir, "calls")
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	_ = os.Remove(path)
+	counts := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		for _, verb := range []string{"list-windows", "list-panes -a", "has-session", "display-message"} {
+			if strings.Contains(line, verb) {
+				counts[verb]++
+			}
+		}
+		if strings.Contains(line, "list-panes -t") {
+			counts["list-panes -t"]++
+		}
+	}
+	return counts
+}
+
+func staleSession(k int) *Session {
+	return &Session{Name: fmt.Sprintf("stale-%d", k), SocketName: DefaultSocketName()}
+}
+
+// The per-row reads a status pass makes on a live row.
+func readLiveRow(s *Session) {
+	for i := 0; i < 3; i++ {
+		_ = s.Exists()
+	}
+	_, _ = s.GetWindowActivity()
+	_ = s.IsPaneDead()
+}
+
+func TestStaleCacheRefresh_LiveRowsAfterExpiryShareOneRefresh(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	RefreshSessionCache()
+	RefreshPaneInfoCache()
+	expireSharedCaches()
+	_ = callCounts(t, dir)
+
+	for k := 0; k < staleRows; k++ {
+		readLiveRow(staleSession(k))
+	}
+
+	got := callCounts(t, dir)
+	t.Logf("%d live rows after cache expiry: %v", staleRows, got)
+	want := map[string]int{"list-windows": 1, "list-panes -a": 1}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("calls = %v, want %v (one shared refresh per cache, no per-row probe)", got, want)
+	}
+}
+
+func TestStaleCacheRefresh_ColdProcessKeepsDirectProbes(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	s := staleSession(0)
+	if !s.Exists() {
+		t.Fatal("Exists() = false on a live session")
+	}
+	got := callCounts(t, dir)
+	if got["list-windows"] != 0 || got["has-session"] != 1 {
+		t.Fatalf("cold process calls = %v, want one has-session and no list-windows", got)
+	}
+}
+
+func TestStaleCacheRefresh_DeadServerTriesOncePerTTL(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	RefreshSessionCache()
+	RefreshPaneInfoCache()
+	writeStaleFixture(t, dir, "down", "")
+	expireSharedCaches()
+	_ = callCounts(t, dir)
+
+	for k := 0; k < staleRows; k++ {
+		readLiveRow(staleSession(k))
+	}
+
+	got := callCounts(t, dir)
+	t.Logf("%d rows with the server down: %v", staleRows, got)
+	if got["list-windows"] > 1 || got["list-panes -a"] > 1 {
+		t.Fatalf("calls = %v, want at most one list-windows and one list-panes -a per TTL", got)
+	}
+}
+
+func TestStaleCacheRefresh_ConcurrentReadersSingleFlight(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	RefreshSessionCache()
+	RefreshPaneInfoCache()
+	writeStaleFixture(t, dir, "slow", "")
+	expireSharedCaches()
+	_ = callCounts(t, dir)
+
+	var wg sync.WaitGroup
+	for k := 0; k < staleRows; k++ {
+		wg.Add(1)
+		go func(s *Session) {
+			defer wg.Done()
+			readLiveRow(s)
+		}(staleSession(k))
+	}
+	wg.Wait()
+
+	got := callCounts(t, dir)
+	if got["list-windows"] != 1 || got["list-panes -a"] != 1 || got["has-session"] != 0 {
+		t.Fatalf("concurrent readers calls = %v, want one refresh of each cache", got)
+	}
+}
+
+// After one timeout the server still reads alive, so one sweep runs against a
+// hung server. Bound what it spawns: one listing per cache per TTL plus each
+// row's own probes, never a listing per row.
+func TestStaleCacheRefresh_HungServerSweepCost(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	RefreshSessionCache()
+	RefreshPaneInfoCache()
+	restorePoll, restoreProbe := tmuxPollTimeout, hasSessionProbeTimeout
+	tmuxPollTimeout, hasSessionProbeTimeout = 200*time.Millisecond, 100*time.Millisecond
+	t.Cleanup(func() { tmuxPollTimeout, hasSessionProbeTimeout = restorePoll, restoreProbe })
+	ResetServerAliveCacheForTest(t)
+	writeFakeTmux(t, dir, `printf '%s\n' "$*" >> "$STALE_FIXTURE/calls"
+exec sleep 30
+`)
+	if !IsServerAlive() {
+		t.Fatal("one timeout declared the server dead")
+	}
+	_ = callCounts(t, dir)
+
+	start := time.Now()
+	RefreshSessionCache()
+	RefreshPaneInfoCache()
+	for k := 0; k < staleRows; k++ {
+		readLiveRow(staleSession(k))
+	}
+	elapsed := time.Since(start)
+
+	got := callCounts(t, dir)
+	t.Logf("one sweep of %d rows on a hung server took %s: %v", staleRows, elapsed, got)
+	if limit := int(elapsed/sessionCacheTTL) + 1; got["list-windows"] > limit {
+		t.Fatalf("list-windows = %d in %s, want at most %d (one per TTL)", got["list-windows"], elapsed, limit)
+	}
+	if limit := int(elapsed/paneCacheTTL) + 1; got["list-panes -a"] > limit {
+		t.Fatalf("list-panes -a = %d in %s, want at most %d (one per TTL)", got["list-panes -a"], elapsed, limit)
+	}
+	if perRow := got["has-session"] + got["display-message"] + got["list-panes -t"]; perRow > 5*staleRows {
+		t.Fatalf("per-row probes = %d, want at most %d", perRow, 5*staleRows)
+	}
+}

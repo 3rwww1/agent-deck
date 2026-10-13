@@ -227,9 +227,10 @@ const SessionPrefix = "agentdeck_"
 // When the server is dead, all subprocess calls take ~3s to fail.
 // This flag short-circuits expensive status loops to prevent UI freezes.
 var (
-	serverAliveMu   sync.RWMutex
-	serverAliveVal  = true
-	serverAliveTime time.Time
+	serverAliveMu       sync.RWMutex
+	serverAliveVal      = true
+	serverAliveTime     time.Time
+	serverAliveTimeouts int
 )
 
 // IsServerAlive returns whether the tmux server was recently reachable.
@@ -246,18 +247,27 @@ func IsServerAlive() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
 	defer cancel()
 	out, err := commandCombinedOutput(tmuxExecContext(ctx, DefaultSocketName(), "list-sessions", "-F", "#{session_name}"))
-	alive := err == nil || (!strings.Contains(string(out), "server exited") &&
-		!strings.Contains(string(out), "lost server") &&
-		ctx.Err() != context.DeadlineExceeded)
-
-	// "no server running" with quick response is fine - server just has no sessions
-	if err != nil && strings.Contains(string(out), "no server running") {
-		alive = true
-	}
 
 	serverAliveMu.Lock()
-	serverAliveVal = alive
-	serverAliveTime = time.Now()
+	var alive bool
+	switch {
+	case err != nil && ctx.Err() == context.DeadlineExceeded:
+		// A dead server fails fast, a loaded one can time out: keep the last
+		// verdict, re-probe on the next call, and go dead on a second timeout.
+		serverAliveTimeouts++
+		serverAliveTime = time.Time{}
+		if serverAliveTimeouts >= 2 {
+			serverAliveVal = false
+			serverAliveTime = time.Now()
+		}
+		alive = serverAliveVal
+	default:
+		alive = err == nil || strings.Contains(string(out), "no server running") ||
+			(!strings.Contains(string(out), "server exited") && !strings.Contains(string(out), "lost server"))
+		serverAliveTimeouts = 0
+		serverAliveVal = alive
+		serverAliveTime = time.Now()
+	}
 	serverAliveMu.Unlock()
 
 	if !alive {
@@ -290,6 +300,14 @@ func sessionCacheStale() bool {
 	return sessionCacheData == nil || time.Since(sessionCacheTime) > sessionCacheTTL
 }
 
+// sessionCacheGate lets a per-row reader refresh a stale session cache once
+// per TTL instead of probing tmux for its own row.
+var sessionCacheGate = cacheRefreshGate{ttl: sessionCacheTTL, stale: func() bool {
+	sessionCacheMu.RLock()
+	defer sessionCacheMu.RUnlock()
+	return sessionCacheStale()
+}}
+
 // RefreshSessionCache updates the cache of existing tmux sessions and their activity
 // Call this ONCE per tick, then use Session.Exists() and Session.GetWindowActivity()
 // which read from cache. This reduces 30+ subprocess spawns to just 1 per tick cycle.
@@ -302,6 +320,7 @@ func sessionCacheStale() bool {
 func RefreshSessionCache() {
 	finish := logging.TraceOp(perfLog, "refresh_session_cache", 100*time.Millisecond)
 	defer finish()
+	sessionCacheGate.markWarm()
 
 	// Try control mode pipe first (zero subprocess)
 	if pm := GetPipeManager(); pm != nil {
@@ -321,8 +340,8 @@ func RefreshSessionCache() {
 		statusLog.Debug("refresh_cache_subprocess_fallback")
 	}
 
-	// Subprocess fallback: list-windows -a (3s timeout to prevent freeze when server is dead)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Subprocess fallback: list-windows -a, bounded to prevent a freeze when the server is dead
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
 	defer cancel()
 	cmd := tmuxExecContext(ctx, DefaultSocketName(), "list-windows", "-a", "-F", tmuxFmt("#{session_name}", "#{window_activity}", "#{window_index}", "#{window_id}", "#{window_name}"))
 	output, err := commandOutput(cmd)
@@ -331,6 +350,7 @@ func RefreshSessionCache() {
 		sessionCacheData = nil
 		sessionCacheTime = time.Time{}
 		sessionCacheMu.Unlock()
+		sessionCacheGate.markFailed()
 		return
 	}
 
@@ -3277,6 +3297,7 @@ func (s *Session) Exists() bool {
 	// (multi-socket cache aliasing), after which restart machinery could kill
 	// the still-running pane.
 	if strings.TrimSpace(s.SocketName) == DefaultSocketName() {
+		sessionCacheGate.refreshIfStale(RefreshSessionCache)
 		if exists, cacheValid := sessionExistsFromCache(s.Name); cacheValid && exists {
 			return true
 		}
@@ -3366,6 +3387,7 @@ func (s *Session) ExistsCached() bool {
 // Falls back to a direct tmux query of the primary pane to avoid false
 // positives in multi-pane layouts.
 func (s *Session) IsPaneDead() bool {
+	paneCacheGate.refreshIfStale(RefreshPaneInfoCache)
 	if info, ok := GetCachedPaneInfo(s.Name); ok {
 		return info.Dead
 	}
@@ -4120,6 +4142,7 @@ func wrapRespawnCommandWithResolver(command string, lookPath func(string) (strin
 // Falls back to direct tmux call if cache is stale
 func (s *Session) GetWindowActivity() (int64, error) {
 	// Try cache first (O(1) map lookup, no subprocess)
+	sessionCacheGate.refreshIfStale(RefreshSessionCache)
 	if activity, cacheValid := sessionActivityFromCache(s.Name); cacheValid {
 		return activity, nil
 	}
@@ -4130,7 +4153,7 @@ func (s *Session) GetWindowActivity() (int64, error) {
 	}
 
 	// No PipeManager: fall back to direct check (spawns subprocess)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
 	defer cancel()
 	cmd := s.tmuxCmdContext(ctx, "display-message", "-t", s.Name, "-p", "#{window_activity}")
 	output, err := commandOutput(cmd)
@@ -4593,6 +4616,7 @@ func (s *Session) GetStatus() (string, error) {
 	// FAST PATH: Title-based state detection for Claude Code sessions.
 	// Claude Code sets pane titles via OSC sequences: Braille spinner while working,
 	// ✳ markers when done. One character check replaces full CapturePane + content scan.
+	paneCacheGate.refreshIfStale(RefreshPaneInfoCache)
 	if paneInfo, ok := GetCachedPaneInfo(s.Name); ok {
 		titleState := AnalyzePaneTitle(paneInfo.Title, paneInfo.CurrentCommand)
 		switch titleState {
