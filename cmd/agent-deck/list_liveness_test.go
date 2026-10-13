@@ -149,7 +149,7 @@ func runDeadList(t *testing.T, mode string) deadListRun {
 	return run
 }
 
-func countCalls(log, sub string) int {
+func shimLogLines(log, sub string) int {
 	n := 0
 	for _, line := range strings.Split(log, "\n") {
 		if strings.Contains(line, sub) {
@@ -175,17 +175,17 @@ func TestListJSON_DeadRowsTrustTheListing(t *testing.T) {
 	got := runDeadList(t, "")
 	perRow := runDeadList(t, "indeterminate")
 	t.Logf("listing: tmux_calls=%d has-session=%d pane probes=%d list-sessions=%d",
-		got.stats.TmuxCalls, countCalls(got.calls, "has-session"), paneDeadProbes(got.calls), countCalls(got.calls, "list-sessions"))
+		got.stats.TmuxCalls, shimLogLines(got.calls, "has-session"), paneDeadProbes(got.calls), shimLogLines(got.calls, "list-sessions"))
 	t.Logf("indeterminate: tmux_calls=%d has-session=%d pane probes=%d list-sessions=%d",
-		perRow.stats.TmuxCalls, countCalls(perRow.calls, "has-session"), paneDeadProbes(perRow.calls), countCalls(perRow.calls, "list-sessions"))
+		perRow.stats.TmuxCalls, shimLogLines(perRow.calls, "has-session"), paneDeadProbes(perRow.calls), shimLogLines(perRow.calls, "list-sessions"))
 
-	if n := countCalls(got.calls, "has-session"); n != 0 {
+	if n := shimLogLines(got.calls, "has-session"); n != 0 {
 		t.Errorf("has-session calls=%d, want 0 for stored-dead rows absent from the listing", n)
 	}
 	if n := paneDeadProbes(got.calls); n != 0 {
 		t.Errorf("per-session list-panes calls=%d, want 0", n)
 	}
-	if n := countCalls(got.calls, "list-sessions"); n > 2 {
+	if n := shimLogLines(got.calls, "list-sessions"); n > 2 {
 		t.Errorf("list-sessions calls=%d, want <= 2 (main already spends 2: candidates plus cache warmup)", n)
 	}
 	if got.stats.TmuxCalls > 8 {
@@ -193,7 +193,7 @@ func TestListJSON_DeadRowsTrustTheListing(t *testing.T) {
 	}
 
 	// An indeterminate listing keeps every per-session probe.
-	if n := countCalls(perRow.calls, "has-session"); n != 2*deadFixtureErrors {
+	if n := shimLogLines(perRow.calls, "has-session"); n != 2*deadFixtureErrors {
 		t.Errorf("indeterminate has-session calls=%d, want %d as on main", n, 2*deadFixtureErrors)
 	}
 	if n := paneDeadProbes(perRow.calls); n != deadFixtureErrors {
