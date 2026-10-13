@@ -1,8 +1,6 @@
 package session
 
-// LiveFirstOrder returns the indices of instances with every stored error or
-// stopped row after the others, keeping input order inside each group. Status
-// passes walk it so live sessions read the tmux caches before they expire.
+// LiveFirstOrder lists indices with stored error and stopped rows last, so live rows hit warm tmux caches.
 func LiveFirstOrder(instances []*Instance) []int {
 	order := make([]int, 0, len(instances))
 	var dead []int
