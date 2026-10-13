@@ -118,9 +118,10 @@ func sessionList(ctx context.Context, in SessionListIn) (SessionListOut, error) 
 	// status the TUI and /api/menu do (#610), and record the pass (#2331).
 	started := time.Now()
 	tmuxBefore := tmux.SubprocessStarts()
-	refresh, cached := session.CLIStatusCandidates(instances)
+	pass := session.NewListingPass()
+	refresh, cached := pass.CLIStatusCandidates(instances)
 	session.RefreshInstancesForCLIStatus(refresh)
-	out.Sessions = liveSessionRows(ctx, out.Profile, instances, cached, transcripts)
+	out.Sessions = liveSessionRows(ctx, out.Profile, instances, cached, transcripts, pass)
 	elapsed := time.Since(started)
 	tmuxCalls := tmux.SubprocessStarts() - tmuxBefore
 	health.RecordStatusPass(elapsed, len(instances), tmuxCalls)
@@ -154,10 +155,9 @@ func staticSessionRow(inst *session.Instance, instances []*session.Instance, pro
 
 // liveSessionRows refreshes each session's status and fills every field.
 // Callers warm the status caches first.
-func liveSessionRows(ctx context.Context, profile string, instances []*session.Instance, cached map[*session.Instance]bool, transcripts map[*session.Instance]string) []SessionRow {
+func liveSessionRows(ctx context.Context, profile string, instances []*session.Instance, cached map[*session.Instance]bool, transcripts map[*session.Instance]string, pass *session.StatusUpdatePass) []SessionRow {
 	rows := make([]SessionRow, len(instances))
 	viewers := session.ViewersByTmuxSession(ctx, instances)
-	var pass session.StatusUpdatePass
 	for _, i := range session.LiveFirstOrder(instances) {
 		inst := instances[i]
 		// Listings need live status, not native-session discovery.
