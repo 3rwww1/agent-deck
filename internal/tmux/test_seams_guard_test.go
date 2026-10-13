@@ -19,6 +19,7 @@ var crossPackageTestSeams = map[string]bool{
 	"ExpirePaneInfoCacheForTest":     true,
 	"ExpireStartupWindowForTest":     true,
 	"ExpireToolDetectionForTest":     true,
+	"HoldCacheRefreshGatesForTest":   true,
 	"ResetServerAliveCacheForTest":   true,
 	"ResetSocketSessionCacheForTest": true,
 	"ResetVersionWarningOnceForTest": true,

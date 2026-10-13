@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/testutil"
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
 // visualcheck review, 2026-09-23: after the foreign-tmux-server guard
@@ -28,6 +29,7 @@ import (
 func startMidTurn(t *testing.T, title, socketName string) *Instance {
 	t.Helper()
 	skipIfNoTmuxBinary(t)
+	tmux.HoldCacheRefreshGatesForTest(t)
 	inst := NewInstanceWithTool(title, t.TempDir(), "claude")
 	inst.tmuxSession.SocketName = socketName
 	if err := inst.tmuxSession.Start("exec sleep 3600"); err != nil {

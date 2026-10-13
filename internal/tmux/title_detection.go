@@ -39,9 +39,11 @@ type WindowInfo struct {
 // Pane info cache - one list-panes call per tick instead of per-session queries.
 // Mirrors the sessionCacheData pattern (tmux.go:38-42).
 var (
-	paneCacheMu   sync.RWMutex
-	paneCacheData map[string]PaneInfo
-	paneCacheTime time.Time
+	paneCacheMu       sync.RWMutex
+	paneCacheData     map[string]PaneInfo
+	paneCacheTime     time.Time
+	paneCacheStarted  time.Time
+	paneCacheStoredAt time.Time
 )
 
 // Window cache - populated alongside session cache from the same list-windows call.
@@ -151,23 +153,21 @@ func updateWindowToolCache(windowTools map[string]map[int]string) {
 // Call this ONCE per tick (from backgroundStatusUpdate), then use GetCachedPaneInfo()
 // to read cached values. Tries PipeManager first, falls back to subprocess.
 func RefreshPaneInfoCache() {
+	paneCacheGate.markWarm()
+	started := time.Now()
 	if pm := GetPipeManager(); pm != nil {
 		if info, windowTools, err := pm.RefreshAllPaneInfo(); err == nil && len(info) > 0 {
-			paneCacheMu.Lock()
-			paneCacheData = info
-			paneCacheTime = time.Now()
-			paneCacheMu.Unlock()
-			updateWindowToolCache(windowTools)
+			storePaneCache(started, info, windowTools)
 			return
 		}
 		statusLog.Debug("pane_cache_subprocess_fallback")
 	}
 
-	// Subprocess fallback: list-panes -a (3s timeout to prevent freeze when server is dead).
+	// Subprocess fallback: list-panes -a, bounded to prevent a freeze when the server is dead.
 	// Package-level probe: routes through tmuxExecContext + DefaultSocketName()
 	// so installations with [tmux].socket_name set see their isolated server
 	// (#687 follow-up, v1.7.55).
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
 	defer cancel()
 	// pane_title is free-text (apps set it via OSC) so it goes LAST; every
 	// other field is a sanitized name, integer, or 0/1 flag that cannot
@@ -177,17 +177,32 @@ func RefreshPaneInfoCache() {
 		tmuxFmt("#{session_name}", "#{pane_current_command}", "#{pane_dead}", "#{window_index}", "#{pane_index}", "#{pane_title}"))
 	output, err := commandOutput(cmd)
 	if err != nil {
+		paneCacheMu.Lock()
+		if paneCacheStoredAt.Before(started) {
+			paneCacheGate.markFailed()
+		}
+		paneCacheMu.Unlock()
 		statusLog.Debug("pane_cache_refresh_failed", "error", err)
 		return
 	}
 
 	newCache, windowTools := parseListPanesOutput(string(output))
+	storePaneCache(started, newCache, windowTools)
+}
 
+// storePaneCache drops a listing that began before the stored one, so a slower, older refresh never wins.
+func storePaneCache(started time.Time, info map[string]PaneInfo, windowTools map[string]map[int]string) {
 	paneCacheMu.Lock()
-	paneCacheData = newCache
-	paneCacheTime = time.Now()
+	if started.Before(paneCacheStarted) {
+		paneCacheMu.Unlock()
+		return
+	}
+	now := time.Now()
+	paneCacheData = info
+	paneCacheTime = now
+	paneCacheStarted = started
+	paneCacheStoredAt = now
 	paneCacheMu.Unlock()
-
 	updateWindowToolCache(windowTools)
 }
 
@@ -268,7 +283,7 @@ func GetCachedPaneInfoSnapshot(sessionName string) (PaneInfo, time.Time, bool) {
 	paneCacheMu.RLock()
 	defer paneCacheMu.RUnlock()
 
-	if paneCacheData == nil || time.Since(paneCacheTime) > 4*time.Second {
+	if paneCacheStale() {
 		return PaneInfo{}, time.Time{}, false
 	}
 
@@ -352,3 +367,16 @@ func containsDoneMarker(s string) bool {
 	}
 	return false
 }
+
+const paneCacheTTL = 4 * time.Second
+
+// Caller must hold paneCacheMu.
+func paneCacheStale() bool {
+	return paneCacheData == nil || time.Since(paneCacheTime) > paneCacheTTL
+}
+
+var paneCacheGate = cacheRefreshGate{ttl: paneCacheTTL, stale: func() bool {
+	paneCacheMu.RLock()
+	defer paneCacheMu.RUnlock()
+	return paneCacheStale()
+}}

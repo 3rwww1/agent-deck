@@ -16,13 +16,15 @@ import (
 // When the server is dead, all subprocess calls take ~3s to fail.
 // This flag short-circuits expensive status loops to prevent UI freezes.
 var (
-	serverAliveMu   sync.RWMutex
-	serverAliveVal  = true
-	serverAliveTime time.Time
+	serverAliveMu       sync.RWMutex
+	serverAliveVal      = true
+	serverAliveTime     time.Time
+	serverAliveTimeouts int
+	serverAliveVerdicts int // verdicts written, so a timeout that overlapped one is not counted
 )
 
 // IsServerAlive returns whether the tmux server was recently reachable.
-// Result is cached for 5 seconds to avoid redundant checks.
+// A verdict is cached for 5 seconds, except that a first timeout on an alive server is re-probed at once.
 func IsServerAlive() bool {
 	serverAliveMu.RLock()
 	if !serverAliveTime.IsZero() && time.Since(serverAliveTime) < 5*time.Second {
@@ -30,23 +32,40 @@ func IsServerAlive() bool {
 		serverAliveMu.RUnlock()
 		return alive
 	}
+	verdictsBefore := serverAliveVerdicts
 	serverAliveMu.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
 	defer cancel()
 	out, err := commandCombinedOutput(tmuxExecContext(ctx, DefaultSocketName(), "list-sessions", "-F", "#{session_name}"))
-	alive := err == nil || (!strings.Contains(string(out), "server exited") &&
-		!strings.Contains(string(out), "lost server") &&
-		ctx.Err() != context.DeadlineExceeded)
-
-	// "no server running" with quick response is fine - server just has no sessions
-	if err != nil && strings.Contains(string(out), "no server running") {
-		alive = true
-	}
 
 	serverAliveMu.Lock()
-	serverAliveVal = alive
-	serverAliveTime = time.Now()
+	var alive bool
+	msg := string(out)
+	lost := strings.Contains(msg, "server exited") || strings.Contains(msg, "lost server")
+	switch {
+	case err != nil && !lost && ctx.Err() == context.DeadlineExceeded:
+		// Only a hung or loaded server times out, so death needs two timeouts in a row.
+		if serverAliveVerdicts == verdictsBefore {
+			serverAliveVerdicts++
+			serverAliveTimeouts++
+			if serverAliveTimeouts >= 2 {
+				serverAliveVal = false
+			}
+			if serverAliveVal {
+				serverAliveTime = time.Time{}
+			} else {
+				serverAliveTime = time.Now()
+			}
+		}
+		alive = serverAliveVal
+	default:
+		alive = err == nil || !lost
+		serverAliveTimeouts = 0
+		serverAliveVal = alive
+		serverAliveTime = time.Now()
+		serverAliveVerdicts++
+	}
 	serverAliveMu.Unlock()
 
 	if !alive {
@@ -62,6 +81,10 @@ var (
 	sessionCacheMu   sync.RWMutex
 	sessionCacheData map[string]int64 // session_name -> activity_timestamp (0 if not in cache)
 	sessionCacheTime time.Time
+	// sessionCacheStarted is when the stored listing began, so a slower, older refresh never overwrites it.
+	sessionCacheStarted time.Time
+	// sessionCacheStoredAt lets a failed refresh keep a listing stored while it ran.
+	sessionCacheStoredAt time.Time
 )
 
 // sessionCacheTTL is the single TTL governing both sessionExistsFromCache
@@ -79,6 +102,12 @@ func sessionCacheStale() bool {
 	return sessionCacheData == nil || time.Since(sessionCacheTime) > sessionCacheTTL
 }
 
+var sessionCacheGate = cacheRefreshGate{ttl: sessionCacheTTL, stale: func() bool {
+	sessionCacheMu.RLock()
+	defer sessionCacheMu.RUnlock()
+	return sessionCacheStale()
+}}
+
 // RefreshSessionCache updates the cache of existing tmux sessions and their activity
 // Call this ONCE per tick, then use Session.Exists() and Session.GetWindowActivity()
 // which read from cache. This reduces 30+ subprocess spawns to just 1 per tick cycle.
@@ -91,27 +120,21 @@ func sessionCacheStale() bool {
 func RefreshSessionCache() {
 	finish := logging.TraceOp(perfLog, "refresh_session_cache", 100*time.Millisecond)
 	defer finish()
+	sessionCacheGate.markWarm()
+	started := time.Now()
 
 	// Try control mode pipe first (zero subprocess)
 	if pm := GetPipeManager(); pm != nil {
 		if activities, windows, err := pm.RefreshAllActivities(); err == nil && len(activities) > 0 {
-			sessionCacheMu.Lock()
-			sessionCacheData = activities
-			sessionCacheTime = time.Now()
-			sessionCacheMu.Unlock()
-
-			windowCacheMu.Lock()
-			windowCacheData = windows
-			windowCacheTime = time.Now()
-			windowCacheMu.Unlock()
+			storeSessionCache(started, activities, windows)
 			return
 		}
 		// Pipe failed: log it so we can verify zero subprocess usage
 		statusLog.Debug("refresh_cache_subprocess_fallback")
 	}
 
-	// Subprocess fallback: list-windows -a (3s timeout to prevent freeze when server is dead)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Subprocess fallback: list-windows -a, bounded to prevent a freeze when the server is dead
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
 	defer cancel()
 	cmd := tmuxExecContext(ctx, DefaultSocketName(), "list-windows", "-a", "-F", tmuxFmt("#{session_name}", "#{window_activity}", "#{window_index}", "#{window_id}", "#{window_name}"))
 	output, err := commandOutput(cmd)
@@ -123,21 +146,35 @@ func RefreshSessionCache() {
 	}
 	if err != nil {
 		sessionCacheMu.Lock()
-		sessionCacheData = nil
-		sessionCacheTime = time.Time{}
+		if sessionCacheStoredAt.Before(started) {
+			sessionCacheData = nil
+			sessionCacheTime = time.Time{}
+			sessionCacheStarted = started
+			sessionCacheGate.markFailed()
+		}
 		sessionCacheMu.Unlock()
 		return
 	}
 
 	newSessionCache, newWindowCache := parseListWindowsOutput(string(output))
+	storeSessionCache(started, newSessionCache, newWindowCache)
+}
 
+func storeSessionCache(started time.Time, sessions map[string]int64, windows map[string][]WindowInfo) {
 	sessionCacheMu.Lock()
-	sessionCacheData = newSessionCache
-	sessionCacheTime = time.Now()
+	if started.Before(sessionCacheStarted) {
+		sessionCacheMu.Unlock()
+		return
+	}
+	now := time.Now()
+	sessionCacheData = sessions
+	sessionCacheTime = now
+	sessionCacheStarted = started
+	sessionCacheStoredAt = now
 	sessionCacheMu.Unlock()
 
 	windowCacheMu.Lock()
-	windowCacheData = newWindowCache
+	windowCacheData = windows
 	windowCacheTime = time.Now()
 	windowCacheMu.Unlock()
 }
@@ -380,8 +417,11 @@ func registerSessionInCache(name string) {
 		sessionCacheData = make(map[string]int64)
 	}
 
-	// Add session with current time as activity
-	sessionCacheData[name] = time.Now().Unix()
+	// Add session with current time as activity, and drop any listing taken before it existed
+	now := time.Now()
+	sessionCacheData[name] = now.Unix()
+	sessionCacheStarted = now
+	sessionCacheStoredAt = now
 }
 
 // sessionActivityFromCache gets session activity timestamp from cache
