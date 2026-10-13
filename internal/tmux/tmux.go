@@ -255,16 +255,17 @@ func IsServerAlive() bool {
 	switch {
 	case err != nil && ctx.Err() == context.DeadlineExceeded:
 		// Only a hung or loaded server times out, so death needs two timeouts in a row.
+		// A probe that finished meanwhile already wrote a fresher verdict.
 		if serverAliveProbes == probesBefore {
 			serverAliveTimeouts++
-		}
-		if serverAliveTimeouts >= 2 {
-			serverAliveVal = false
-		}
-		if serverAliveVal {
-			serverAliveTime = time.Time{}
-		} else {
-			serverAliveTime = time.Now()
+			if serverAliveTimeouts >= 2 {
+				serverAliveVal = false
+			}
+			if serverAliveVal {
+				serverAliveTime = time.Time{}
+			} else {
+				serverAliveTime = time.Now()
+			}
 		}
 		alive = serverAliveVal
 	default:
@@ -3317,7 +3318,7 @@ func (s *Session) Exists() bool {
 	}
 
 	if onDefaultSocket {
-		s.refreshStaleCache(&sessionCacheGate, RefreshSessionCache)
+		sessionCacheGate.refreshIfStale(RefreshSessionCache)
 		if exists, cacheValid := sessionExistsFromCache(s.Name); cacheValid && exists {
 			return true
 		}
@@ -3406,7 +3407,6 @@ func (s *Session) refreshStaleCache(gate *cacheRefreshGate, refresh func()) {
 // Uses the cached pane info (refreshed once per tick) for zero-cost lookups.
 // Falls back to a direct tmux query of the primary pane to avoid false
 // positives in multi-pane layouts.
-
 func (s *Session) IsPaneDead() bool {
 	s.refreshStaleCache(&paneCacheGate, RefreshPaneInfoCache)
 	if info, ok := GetCachedPaneInfo(s.Name); ok {
@@ -4163,7 +4163,6 @@ func wrapRespawnCommandWithResolver(command string, lookPath func(string) (strin
 // Falls back to direct tmux call if cache is stale
 func (s *Session) GetWindowActivity() (int64, error) {
 	// Try cache first (O(1) map lookup, no subprocess)
-	s.refreshStaleCache(&sessionCacheGate, RefreshSessionCache)
 	if activity, cacheValid := sessionActivityFromCache(s.Name); cacheValid {
 		return activity, nil
 	}
@@ -4171,6 +4170,11 @@ func (s *Session) GetWindowActivity() (int64, error) {
 	// When PipeManager is active, route through pipe (zero subprocess)
 	if pm := GetPipeManager(); pm != nil {
 		return pm.GetWindowActivity(s.Name)
+	}
+
+	s.refreshStaleCache(&sessionCacheGate, RefreshSessionCache)
+	if activity, cacheValid := sessionActivityFromCache(s.Name); cacheValid {
+		return activity, nil
 	}
 
 	// No PipeManager: fall back to direct check (spawns subprocess)
