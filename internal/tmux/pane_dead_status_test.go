@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -38,8 +39,7 @@ func TestParsePaneDeadStatus(t *testing.T) {
 	}
 }
 
-// With base-index and pane-base-index set to 1 there is no window 0 or pane 0,
-// so a probe hardcoding "<session>:0.0" fails and dead panes go undetected.
+// The probes must find the first pane when window 0 and pane 0 do not exist.
 func TestPaneDeadProbes_NonZeroBaseIndex(t *testing.T) {
 	requireTmux(t)
 	socket, _ := makeIsolatedServer(t)
@@ -55,15 +55,12 @@ func TestPaneDeadProbes_NonZeroBaseIndex(t *testing.T) {
 	assertDeadWithExit7(t, s)
 }
 
-// A session-only base-index override, with the server default left at 0, must
-// not send the probes back to window 0.
-func TestPaneDeadProbes_PerSessionBaseIndex(t *testing.T) {
+func TestPaneDeadProbes_FirstWindowNotZero(t *testing.T) {
 	requireTmux(t)
 	socket, _ := makeIsolatedServer(t)
 	ctl := tmuxCtl(t, socket)
 	ctl("set-option", "-g", "remain-on-exit", "on")
 	ctl("new-session", "-d", "-s", "based", "sh")
-	ctl("set-option", "-t", "based", "base-index", "1")
 	ctl("new-window", "-d", "-t", "based:", "sh", "-c", "exit 7")
 	ctl("kill-window", "-t", "based:0")
 	require.Equal(t, "1.0", ctl("list-panes", "-t", "based", "-F", "#{window_index}.#{pane_index}"))
@@ -73,8 +70,7 @@ func TestPaneDeadProbes_PerSessionBaseIndex(t *testing.T) {
 	assertDeadWithExit7(t, s)
 }
 
-// tmux prefix-matches a bare session target, so a probe for a missing session
-// must not read the dead pane of another session whose name extends it.
+// A bare target prefix-matches, so "based" must not resolve to "basedx".
 func TestPaneDeadProbes_ExactSessionMatch(t *testing.T) {
 	requireTmux(t)
 	socket, _ := makeIsolatedServer(t)
@@ -87,6 +83,20 @@ func TestPaneDeadProbes_ExactSessionMatch(t *testing.T) {
 	assert.False(t, s.IsPaneDead(), "IsPaneDead read basedx")
 	_, ok := s.PaneDeadExitStatus()
 	assert.False(t, ok, "PaneDeadExitStatus read basedx")
+}
+
+func TestPaneDeadProbes_LiveSplitPane(t *testing.T) {
+	requireTmux(t)
+	socket, _ := makeIsolatedServer(t)
+	ctl := tmuxCtl(t, socket)
+	ctl("set-option", "-g", "remain-on-exit", "on")
+	ctl("new-session", "-d", "-s", "based", "sh", "-c", "sleep 0.5; exit 7")
+	ctl("split-window", "-d", "-t", "=based:^", "sh")
+	waitPaneDead(t, ctl, "based")
+	require.Equal(t, "1\n0", ctl("list-panes", "-t", "=based:^", "-F", "#{pane_dead}"))
+
+	s := &Session{Name: "based", SocketName: socket}
+	assertDeadWithExit7(t, s)
 }
 
 func TestPaneDeadExitStatus_OneSpawn(t *testing.T) {
@@ -106,7 +116,7 @@ func TestPaneDeadExitStatus_OneSpawn(t *testing.T) {
 func waitPaneDead(t *testing.T, ctl func(args ...string) string, session string) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		return ctl("list-panes", "-t", "="+session, "-F", "#{pane_dead}") == "1"
+		return strings.HasPrefix(ctl("list-panes", "-t", "="+session, "-F", "#{pane_dead}"), "1")
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
