@@ -39,10 +39,11 @@ type WindowInfo struct {
 // Pane info cache - one list-panes call per tick instead of per-session queries.
 // Mirrors the sessionCacheData pattern (tmux.go:38-42).
 var (
-	paneCacheMu      sync.RWMutex
-	paneCacheData    map[string]PaneInfo
-	paneCacheTime    time.Time
-	paneCacheStarted time.Time
+	paneCacheMu       sync.RWMutex
+	paneCacheData     map[string]PaneInfo
+	paneCacheTime     time.Time
+	paneCacheStarted  time.Time
+	paneCacheStoredAt time.Time
 )
 
 // Window cache - populated alongside session cache from the same list-windows call.
@@ -176,7 +177,11 @@ func RefreshPaneInfoCache() {
 		tmuxFmt("#{session_name}", "#{pane_current_command}", "#{pane_dead}", "#{window_index}", "#{pane_index}", "#{pane_title}"))
 	output, err := commandOutput(cmd)
 	if err != nil {
-		paneCacheGate.markFailed()
+		paneCacheMu.Lock()
+		if paneCacheStoredAt.Before(started) {
+			paneCacheGate.markFailed()
+		}
+		paneCacheMu.Unlock()
 		statusLog.Debug("pane_cache_refresh_failed", "error", err)
 		return
 	}
@@ -193,8 +198,9 @@ func storePaneCache(started time.Time, info map[string]PaneInfo, windowTools map
 		return
 	}
 	paneCacheData = info
-	paneCacheTime = time.Now()
+	paneCacheTime = started
 	paneCacheStarted = started
+	paneCacheStoredAt = time.Now()
 	paneCacheMu.Unlock()
 	updateWindowToolCache(windowTools)
 }

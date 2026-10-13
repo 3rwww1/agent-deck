@@ -50,10 +50,10 @@ func resetStaleCachesForTest(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		sessionCacheMu.Lock()
-		sessionCacheData, sessionCacheTime, sessionCacheStarted = nil, time.Time{}, time.Time{}
+		sessionCacheData, sessionCacheTime, sessionCacheStarted, sessionCacheStoredAt = nil, time.Time{}, time.Time{}, time.Time{}
 		sessionCacheMu.Unlock()
 		paneCacheMu.Lock()
-		paneCacheData, paneCacheTime, paneCacheStarted = nil, time.Time{}, time.Time{}
+		paneCacheData, paneCacheTime, paneCacheStarted, paneCacheStoredAt = nil, time.Time{}, time.Time{}, time.Time{}
 		paneCacheMu.Unlock()
 		resetCacheRefreshGatesForTest()
 	}
@@ -248,5 +248,36 @@ func TestStaleCacheRefresh_OlderListingNeverOverwritesNewer(t *testing.T) {
 	}
 	if _, ok := GetCachedPaneInfo("killed"); ok {
 		t.Fatal("older pane listing won")
+	}
+}
+
+// A refresh that fails after a newer-started one stored keeps that listing and arms no backoff.
+func TestStaleCacheRefresh_FailureKeepsListingStoredMeanwhile(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	RefreshSessionCache()
+	writeStaleFixture(t, dir, "down", "")
+	sessionCacheMu.Lock()
+	sessionCacheStoredAt = time.Now().Add(time.Hour)
+	sessionCacheMu.Unlock()
+	RefreshSessionCache()
+	if exists, valid := sessionExistsFromCache("stale-0"); !valid || !exists {
+		t.Fatalf("failed refresh wiped a listing stored while it ran: exists=%v valid=%v", exists, valid)
+	}
+	if sessionCacheGate.backingOff() {
+		t.Fatal("failed refresh armed the backoff over a newer listing")
+	}
+}
+
+// A session registered after a listing began survives that listing.
+func TestStaleCacheRefresh_RegisteredSessionSurvivesOlderListing(t *testing.T) {
+	resetStaleCachesForTest(t)
+	began := time.Now()
+	registerSessionInCache("new-one")
+	storeSessionCache(began, map[string]int64{"other": 1}, nil)
+	sessionCacheMu.RLock()
+	_, kept := sessionCacheData["new-one"]
+	sessionCacheMu.RUnlock()
+	if !kept {
+		t.Fatal("a listing taken before the session existed dropped it")
 	}
 }

@@ -294,6 +294,8 @@ var (
 	sessionCacheTime time.Time
 	// sessionCacheStarted is when the stored listing began, so a slower, older refresh never overwrites it.
 	sessionCacheStarted time.Time
+	// sessionCacheStoredAt lets a failed refresh keep a listing stored while it ran.
+	sessionCacheStoredAt time.Time
 )
 
 // sessionCacheTTL is the single TTL governing both sessionExistsFromCache
@@ -349,7 +351,7 @@ func RefreshSessionCache() {
 	output, err := commandOutput(cmd)
 	if err != nil {
 		sessionCacheMu.Lock()
-		if !started.Before(sessionCacheStarted) {
+		if sessionCacheStoredAt.Before(started) {
 			sessionCacheData = nil
 			sessionCacheTime = time.Time{}
 			sessionCacheStarted = started
@@ -370,8 +372,9 @@ func storeSessionCache(started time.Time, sessions map[string]int64, windows map
 		return
 	}
 	sessionCacheData = sessions
-	sessionCacheTime = time.Now()
+	sessionCacheTime = started
 	sessionCacheStarted = started
+	sessionCacheStoredAt = time.Now()
 	sessionCacheMu.Unlock()
 
 	windowCacheMu.Lock()
@@ -624,8 +627,9 @@ func registerSessionInCache(name string) {
 		sessionCacheData = make(map[string]int64)
 	}
 
-	// Add session with current time as activity
+	// Add session with current time as activity, and drop any listing taken before it existed
 	sessionCacheData[name] = time.Now().Unix()
+	sessionCacheStarted = time.Now()
 }
 
 // sessionActivityFromCache gets session activity timestamp from cache
