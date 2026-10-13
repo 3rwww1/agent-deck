@@ -197,10 +197,11 @@ func storePaneCache(started time.Time, info map[string]PaneInfo, windowTools map
 		paneCacheMu.Unlock()
 		return
 	}
+	now := time.Now()
 	paneCacheData = info
-	paneCacheTime = started
+	paneCacheTime = now
 	paneCacheStarted = started
-	paneCacheStoredAt = time.Now()
+	paneCacheStoredAt = now
 	paneCacheMu.Unlock()
 	updateWindowToolCache(windowTools)
 }

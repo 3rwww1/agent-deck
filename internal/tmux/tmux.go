@@ -371,10 +371,11 @@ func storeSessionCache(started time.Time, sessions map[string]int64, windows map
 		sessionCacheMu.Unlock()
 		return
 	}
+	now := time.Now()
 	sessionCacheData = sessions
-	sessionCacheTime = started
+	sessionCacheTime = now
 	sessionCacheStarted = started
-	sessionCacheStoredAt = time.Now()
+	sessionCacheStoredAt = now
 	sessionCacheMu.Unlock()
 
 	windowCacheMu.Lock()

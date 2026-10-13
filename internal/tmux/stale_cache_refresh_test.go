@@ -301,3 +301,28 @@ func TestStaleCacheRefresh_FailedRefreshKeepsRegisteredSession(t *testing.T) {
 		t.Fatal("a refresh that began before the session was registered wiped it on failure")
 	}
 }
+
+// A listing slower than the TTL but under the poll timeout must not be stale when it lands.
+func TestStaleCacheRefresh_SlowListingServesLaterRows(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	RefreshSessionCache()
+	RefreshPaneInfoCache()
+	expireSharedCaches()
+	_ = callCounts(t, dir)
+	writeFakeTmux(t, dir, `printf '%s\n' "$*" >> "$STALE_FIXTURE/calls"
+case "$*" in
+*list-windows*) sleep 2.3; cat "$STALE_FIXTURE/windows";;
+*"list-panes -a"*) cat "$STALE_FIXTURE/panes";;
+*list-panes*) echo 0;;
+*display-message*) echo 100;;
+esac
+exit 0
+`)
+
+	for k := 0; k < 3; k++ {
+		_ = staleSession(k).Exists()
+	}
+	if got := callCounts(t, dir); got["list-windows"] != 1 || got["has-session"] != 0 {
+		t.Fatalf("calls = %v, want one list-windows and no has-session: a slow listing was stale on arrival", got)
+	}
+}
