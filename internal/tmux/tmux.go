@@ -223,6 +223,10 @@ func captureGoneFromErr(err error) bool {
 
 const SessionPrefix = "agentdeck_"
 
+// A slow answer is not a dead server: under host load one client spawn can
+// take over a second, so match the 3s the sweep's own calls allow.
+const serverAliveProbeTimeout = 3 * time.Second
+
 // serverAlive tracks whether the tmux server is responsive.
 // When the server is dead, all subprocess calls take ~3s to fail.
 // This flag short-circuits expensive status loops to prevent UI freezes.
@@ -243,8 +247,7 @@ func IsServerAlive() bool {
 	}
 	serverAliveMu.RUnlock()
 
-	// Quick probe: 1-second timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), serverAliveProbeTimeout)
 	defer cancel()
 	out, err := commandCombinedOutput(tmuxExecContext(ctx, DefaultSocketName(), "list-sessions", "-F", "#{session_name}"))
 	alive := err == nil || (!strings.Contains(string(out), "server exited") &&
@@ -265,6 +268,14 @@ func IsServerAlive() bool {
 		perfLog.Warn("tmux_server_dead")
 	}
 	return alive
+}
+
+// ResetServerAliveCacheForTest forces the next IsServerAlive call to probe.
+func ResetServerAliveCacheForTest() {
+	serverAliveMu.Lock()
+	defer serverAliveMu.Unlock()
+	serverAliveVal = true
+	serverAliveTime = time.Time{}
 }
 
 // Session cache - reduces subprocess spawns from O(n) to O(1) per tick
