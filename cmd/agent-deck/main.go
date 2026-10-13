@@ -3539,9 +3539,11 @@ func countByStatus(instances []*session.Instance) statusCounts {
 	// reachable, but `list --json` hides them. Without this filter `status`
 	// counts them anyway, so its total silently exceeds `list --json`'s.
 	instances = session.VisibleInstances(instances)
+	// A count needs live status only; native session discovery belongs to the poller.
+	var pass session.StatusUpdatePass
 	var counts statusCounts
 	for _, inst := range instances {
-		_ = inst.UpdateStatus() // Refresh status from tmux
+		_ = pass.UpdateStatusOnly(inst)
 		switch inst.Status {
 		case session.StatusRunning:
 			counts.running++
@@ -3695,8 +3697,9 @@ func handleStatus(profile string, args []string) {
 		if *verbose || *verboseShort {
 			session.RefreshInstancesForCLIStatus(instances)
 			resp.Sessions = make([]statusSessionJSON, 0, len(instances))
+			var pass session.StatusUpdatePass
 			for _, inst := range instances {
-				_ = inst.UpdateStatus()
+				_ = pass.UpdateStatusOnly(inst)
 				substate := string(inst.Substate()) // before Status: see buildListJSON
 				sj := statusSessionJSON{
 					ID:             inst.ID,

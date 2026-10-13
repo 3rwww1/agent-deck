@@ -138,3 +138,41 @@ func runListFixture(t *testing.T, sb *harness.Sandbox, env []string) {
 		}
 	}
 }
+
+// status only counts, so it must read live status without native-session
+// discovery, the same as list --json.
+func TestStatusJSON_NoSessionDiscovery(t *testing.T) {
+	for _, args := range [][]string{{"status", "--json"}, {"status", "--json", "-v"}} {
+		t.Run(strings.Join(args[1:], " "), func(t *testing.T) { runStatusNoDiscovery(t, args) })
+	}
+}
+
+func runStatusNoDiscovery(t *testing.T, args []string) {
+	t.Helper()
+	sb, env, calls := listPerfFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, sb.BinPath, args...)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	var counts struct {
+		Running int `json:"running"`
+		Total   int `json:"total"`
+	}
+	if err := json.Unmarshal(out, &counts); err != nil {
+		t.Fatalf("status JSON: %v\n%s", err, out)
+	}
+	if counts.Running != 100 || counts.Total != 100 {
+		t.Errorf("counts running=%d total=%d, want 100/100 from live panes", counts.Running, counts.Total)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "CODEX_SESSION_ID") {
+		t.Error("status performed native Codex session discovery")
+	}
+}
