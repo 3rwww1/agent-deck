@@ -164,7 +164,7 @@ func RefreshPaneInfoCache() {
 		statusLog.Debug("pane_cache_subprocess_fallback")
 	}
 
-	// Subprocess fallback: list-panes -a (3s timeout to prevent freeze when server is dead).
+	// Subprocess fallback: list-panes -a, bounded to prevent a freeze when the server is dead.
 	// Package-level probe: routes through tmuxExecContext + DefaultSocketName()
 	// so installations with [tmux].socket_name set see their isolated server
 	// (#687 follow-up, v1.7.55).

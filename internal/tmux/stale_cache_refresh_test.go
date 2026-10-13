@@ -184,7 +184,7 @@ func TestStaleCacheRefresh_ConcurrentReadersSingleFlight(t *testing.T) {
 }
 
 // One timeout still reads alive, so one sweep runs against a hung server: bound its listings.
-func TestStaleCacheRefresh_HungServerSweepCost(t *testing.T) {
+func TestStaleCacheRefresh_HungServerSweepListings(t *testing.T) {
 	dir := installStaleCacheFake(t)
 	RefreshSessionCache()
 	RefreshPaneInfoCache()

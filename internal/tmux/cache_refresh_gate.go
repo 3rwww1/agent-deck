@@ -18,7 +18,10 @@ type cacheRefreshGate struct {
 
 func (g *cacheRefreshGate) markWarm() { g.warm.Store(true) }
 
-func (g *cacheRefreshGate) markFailed() { g.failedAt.Store(time.Now().UnixNano()) }
+// cacheRefreshEpoch keeps failedAt monotonic, so a wall-clock step cannot stretch the backoff. Zero means never failed.
+var cacheRefreshEpoch = time.Now()
+
+func (g *cacheRefreshGate) markFailed() { g.failedAt.Store(int64(time.Since(cacheRefreshEpoch)) + 1) }
 
 func (g *cacheRefreshGate) reset() {
 	g.warm.Store(false)
@@ -39,5 +42,6 @@ func (g *cacheRefreshGate) refreshIfStale(refresh func()) {
 }
 
 func (g *cacheRefreshGate) backingOff() bool {
-	return time.Since(time.Unix(0, g.failedAt.Load())) < g.ttl
+	failedAt := g.failedAt.Load()
+	return failedAt != 0 && time.Since(cacheRefreshEpoch)-time.Duration(failedAt) < g.ttl
 }

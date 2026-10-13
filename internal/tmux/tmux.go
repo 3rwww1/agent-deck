@@ -231,7 +231,7 @@ var (
 	serverAliveVal      = true
 	serverAliveTime     time.Time
 	serverAliveTimeouts int
-	serverAliveProbes   int // completed probes, so overlapping timeouts count once
+	serverAliveVerdicts int // verdicts written, so a timeout that overlapped one is not counted
 )
 
 // IsServerAlive returns whether the tmux server was recently reachable.
@@ -243,7 +243,7 @@ func IsServerAlive() bool {
 		serverAliveMu.RUnlock()
 		return alive
 	}
-	probesBefore := serverAliveProbes
+	verdictsBefore := serverAliveVerdicts
 	serverAliveMu.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
@@ -255,8 +255,8 @@ func IsServerAlive() bool {
 	switch {
 	case err != nil && ctx.Err() == context.DeadlineExceeded:
 		// Only a hung or loaded server times out, so death needs two timeouts in a row.
-		// A probe that finished meanwhile already wrote a fresher verdict.
-		if serverAliveProbes == probesBefore {
+		if serverAliveVerdicts == verdictsBefore {
+			serverAliveVerdicts++
 			serverAliveTimeouts++
 			if serverAliveTimeouts >= 2 {
 				serverAliveVal = false
@@ -275,8 +275,8 @@ func IsServerAlive() bool {
 		serverAliveTimeouts = 0
 		serverAliveVal = alive
 		serverAliveTime = time.Now()
+		serverAliveVerdicts++
 	}
-	serverAliveProbes++
 	serverAliveMu.Unlock()
 
 	if !alive {

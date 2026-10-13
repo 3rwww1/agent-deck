@@ -127,3 +127,25 @@ func TestIsServerAlive_DeadVerdictStaysCachedThroughTimeout(t *testing.T) {
 		t.Fatal("dead verdict was re-probed instead of cached")
 	}
 }
+
+// A timeout that started after the last verdict counts, even when an older overlapping probe ends first.
+func TestIsServerAlive_StaggeredTimeoutsStillGoDead(t *testing.T) {
+	restore := tmuxPollTimeout
+	tmuxPollTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { tmuxPollTimeout = restore })
+	installServerAliveFake(t, "exec sleep 30")
+	var wg sync.WaitGroup
+	for _, delay := range []time.Duration{0, 200 * time.Millisecond, 650 * time.Millisecond} {
+		wg.Add(1)
+		go func(d time.Duration) {
+			defer wg.Done()
+			time.Sleep(d)
+			_ = IsServerAlive()
+		}(delay)
+	}
+	wg.Wait()
+	start := time.Now()
+	if IsServerAlive() || time.Since(start) > 100*time.Millisecond {
+		t.Fatal("staggered timeouts on a hung server never produced a cached dead verdict")
+	}
+}
