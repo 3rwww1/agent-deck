@@ -2932,9 +2932,10 @@ func handleList(profile string, args []string) {
 		// reports the same Status the TUI and /api/menu do (issue #610).
 		statusStarted := time.Now()
 		tmuxBefore := tmux.SubprocessStarts()
-		refresh, cached := session.CLIStatusCandidates(instances)
+		pass := session.NewListingPass()
+		refresh, cached := pass.CLIStatusCandidates(instances)
 		session.RefreshInstancesForCLIStatus(refresh)
-		output, err := buildListJSON(storage.Profile(), instances, cached)
+		output, err := buildListJSONWithPass(storage.Profile(), instances, cached, pass)
 		statusElapsed := time.Since(statusStarted)
 		tmuxCalls := tmux.SubprocessStarts() - tmuxBefore
 		// #2331: this status pass is the one thing both the poll (`list
@@ -3004,6 +3005,11 @@ func buildListJSON(profileName string, instances []*session.Instance, cachedStat
 	if len(cachedStatus) != 0 {
 		cached = cachedStatus[0]
 	}
+	return buildListJSONWithPass(profileName, instances, cached, session.NewListingPass())
+}
+
+// buildListJSONWithPass reuses the pass that chose the candidates.
+func buildListJSONWithPass(profileName string, instances []*session.Instance, cached map[*session.Instance]bool, pass *session.StatusUpdatePass) ([]byte, error) {
 	type sessionJSON struct {
 		ID                string    `json:"id"`
 		ParentSessionID   string    `json:"parent_session_id,omitempty"`
@@ -3057,9 +3063,7 @@ func buildListJSON(profileName string, instances []*session.Instance, cachedStat
 	sessions := make([]sessionJSON, len(instances))
 	transcripts := session.ListedTranscriptPaths(instances)
 	viewers := session.ViewersByTmuxSession(context.Background(), instances)
-	var pass session.StatusUpdatePass
-	for _, i := range session.LiveFirstOrder(instances) {
-		inst := instances[i]
+	for i, inst := range instances {
 		// Listings need live status, not native-session discovery. Persisted
 		// rows have no status freshness stamp, so still validate liveness.
 		if !cached[inst] {

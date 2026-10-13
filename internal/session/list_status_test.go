@@ -22,7 +22,7 @@ func TestCLIStatusCandidatesStoppedBudget(t *testing.T) {
 				instances[i] = inst
 			}
 			start := time.Now()
-			refresh, cached := CLIStatusCandidates(instances)
+			refresh, cached := NewListingPass().CLIStatusCandidates(instances)
 			elapsed := time.Since(start)
 			if len(refresh) != 0 || len(cached) != tc.count {
 				t.Fatalf("refresh=%d cached=%d, want 0 and %d", len(refresh), len(cached), tc.count)

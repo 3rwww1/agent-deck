@@ -38,9 +38,14 @@ var codexOwnershipCache = struct {
 // workers. New bindings and refreshes by other passes remain visible. Create a
 // new pass for each sweep; do not retain it between sweeps.
 type StatusUpdatePass struct {
+	pinLiveness bool // set only by NewListingPass
+
 	mu       sync.Mutex
 	bySocket map[string]codexOwnershipSnapshot
 	loading  map[string]chan struct{}
+	// Guarded by mu: one socket listing per pass, nil when indeterminate.
+	liveNames   map[string]map[string]struct{}
+	liveLoading map[string]chan struct{}
 }
 
 // UpdateStatus refreshes one instance using this pass's shared evidence.
