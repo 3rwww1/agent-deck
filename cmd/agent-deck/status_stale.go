@@ -237,8 +237,8 @@ func runStatusStale(profile string, threshold time.Duration, jsonOutput bool) {
 	// This only reads tmux/hook state into the in-memory Instance objects; it
 	// does not write anything back to storage (no SaveWithGroups call below).
 	session.RefreshInstancesForCLIStatus(instances)
-	for _, inst := range instances {
-		_ = inst.UpdateStatus()
+	for _, i := range session.LiveFirstOrder(instances) {
+		_ = instances[i].UpdateStatus()
 	}
 
 	now := time.Now()
