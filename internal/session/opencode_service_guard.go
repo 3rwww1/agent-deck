@@ -8,29 +8,35 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-// One guard per process: lanes share one health probe per TTL, and recovery runs under a file lock.
+// One guard per process: lanes share one health probe per TTL, and a stall gets a grace before a restart.
 
 const (
 	openCodeServiceHealthTTL     = 30 * time.Second
+	openCodeServiceStallGrace    = 2 * time.Minute
+	openCodeServiceFailureGap    = 45 * time.Second
 	openCodeServiceHealthTimeout = 2 * time.Second
 	openCodeServiceActionTimeout = 30 * time.Second
 	openCodeServiceLockName      = "opencode-service.lock"
 )
 
 type openCodeServiceGuard struct {
-	mu        sync.Mutex
-	svc       openCodeService
-	healthyAt time.Time
+	mu             sync.Mutex
+	svc            openCodeService
+	healthyAt      time.Time
+	unhealthySince time.Time
+	lastFailedAt   time.Time
 
 	now     func() time.Time
 	lockDir func() (string, error)
 	status  func(binary string) (openCodeService, error)
-	run     func(binary, action string) error
+	run     func(binary, action string) error // "start" or "restart"
 	healthy func(svc openCodeService) bool
 }
 
@@ -66,17 +72,35 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 		return g.markHealthy(svc), true
 	}
 
-	if !errors.Is(err, errOpenCodeServiceStopped) {
-		if err != nil {
-			sessionLog.Debug("opencode_service_status_failed", slog.String("error", err.Error()))
-		}
+	var action string
+	switch {
+	case errors.Is(err, errOpenCodeServiceStopped):
+		action = "start"
+	case err != nil:
+		sessionLog.Debug("opencode_service_status_failed", slog.String("error", err.Error()))
 		return openCodeService{}, false
+	default:
+		// A stall usually clears by itself; failures further apart than the gap are separate outages.
+		now := g.now()
+		if g.unhealthySince.IsZero() || now.Sub(g.lastFailedAt) > openCodeServiceFailureGap {
+			g.unhealthySince = now
+		}
+		g.lastFailedAt = now
+		if now.Sub(g.unhealthySince) < openCodeServiceStallGrace {
+			return openCodeService{}, false
+		}
+		// Another agent-deck process may have restarted it moments ago.
+		if last := lock.lastRestart(); !last.IsZero() && now.Sub(last) < openCodeServiceStallGrace {
+			return openCodeService{}, false
+		}
+		lock.recordRestart(now)
+		action = "restart"
 	}
 
-	sessionLog.Warn("opencode_service_recover", slog.String("action", "start"))
-	if err := g.run(binary, "start"); err != nil {
+	sessionLog.Warn("opencode_service_recover", slog.String("action", action))
+	if err := g.run(binary, action); err != nil {
 		sessionLog.Warn("opencode_service_recover_failed",
-			slog.String("action", "start"), slog.String("error", err.Error()))
+			slog.String("action", action), slog.String("error", err.Error()))
 		return openCodeService{}, false
 	}
 	if svc, err := g.status(binary); err == nil && g.healthy(svc) {
@@ -88,10 +112,12 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 func (g *openCodeServiceGuard) markHealthy(svc openCodeService) openCodeService {
 	g.svc = svc
 	g.healthyAt = g.now()
+	g.unhealthySince = time.Time{}
+	g.lastFailedAt = time.Time{}
 	return svc
 }
 
-// openCodeServiceLock serializes recovery across processes; a waiter re-reads the status first.
+// openCodeServiceLock serializes recovery across processes and holds the last restart time.
 type openCodeServiceLock struct{ f *os.File }
 
 func (g *openCodeServiceGuard) lock() (*openCodeServiceLock, error) {
@@ -111,6 +137,21 @@ func (g *openCodeServiceGuard) lock() (*openCodeServiceLock, error) {
 		return nil, err
 	}
 	return &openCodeServiceLock{f: f}, nil
+}
+
+func (l *openCodeServiceLock) lastRestart() time.Time {
+	buf := make([]byte, 32)
+	n, _ := l.f.ReadAt(buf, 0)
+	unix, err := strconv.ParseInt(strings.TrimSpace(string(buf[:n])), 10, 64)
+	if err != nil || unix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(unix, 0)
+}
+
+func (l *openCodeServiceLock) recordRestart(at time.Time) {
+	_ = l.f.Truncate(0)
+	_, _ = l.f.WriteAt([]byte(strconv.FormatInt(at.Unix(), 10)), 0)
 }
 
 func (l *openCodeServiceLock) release() {
