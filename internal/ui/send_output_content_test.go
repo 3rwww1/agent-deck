@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
@@ -75,7 +76,7 @@ func TestGetSessionContentWithLive_PrefersFreshIDOverStoredStaleID(t *testing.T)
 	inst.Tool = "claude"
 	inst.ClaudeSessionID = "stale-uuid" // stored ID is stale (post-resume scenario)
 
-	content, err := getSessionContentWithLive(inst, "fresh-uuid")
+	content, err := getSessionContentWithLive(inst, "fresh-uuid", nil)
 	if err != nil {
 		t.Fatalf("getSessionContentWithLive: unexpected error: %v", err)
 	}
@@ -104,7 +105,7 @@ func TestGetSessionContentWithLive_KeepsStoredIDWhenLiveEmpty(t *testing.T) {
 	inst.Tool = "claude"
 	inst.ClaudeSessionID = "stored-uuid"
 
-	content, err := getSessionContentWithLive(inst, "")
+	content, err := getSessionContentWithLive(inst, "", nil)
 	if err != nil {
 		t.Fatalf("getSessionContentWithLive: unexpected error: %v", err)
 	}
@@ -125,11 +126,31 @@ func TestGetSessionContentWithLive_NoOpForNonClaudeTool(t *testing.T) {
 	inst.ClaudeSessionID = "unused-id"
 
 	// tmuxSession is nil here; fallback path should yield the canonical error.
-	_, err := getSessionContentWithLive(inst, "irrelevant-live-id")
+	_, err := getSessionContentWithLive(inst, "irrelevant-live-id", nil)
 	if err == nil {
 		t.Fatalf("expected error when tool=shell and tmuxSession=nil, got nil")
 	}
 	if inst.ClaudeSessionID != "unused-id" {
 		t.Errorf("ClaudeSessionID mutated for non-claude tool: got %q", inst.ClaudeSessionID)
+	}
+}
+
+// A lane that has not replied yet never shows a peer's reply from its directory.
+func TestGetSessionContentWithLive_NeverReturnsPeerTranscript(t *testing.T) {
+	tempProject := t.TempDir()
+	cleanup := setupClaudeConfigWithTwoJSONLs(t, tempProject,
+		"peer-a-uuid", "PEER_A_REPLY", "peer-b-uuid", "PEER_B_REPLY")
+	defer cleanup()
+
+	lane := session.NewInstance("lane", tempProject)
+	lane.Tool, lane.ClaudeSessionID, lane.LastStartedAt = "claude", "lane-uuid", time.Now().Add(-time.Hour)
+	peers := []*session.Instance{lane}
+	for _, id := range []string{"peer-a-uuid", "peer-b-uuid"} {
+		peer := session.NewInstance(id, tempProject)
+		peer.Tool, peer.ClaudeSessionID = "claude", id
+		peers = append(peers, peer)
+	}
+	if content, _ := getSessionContentWithLive(lane, "", peers); strings.Contains(content, "PEER_") {
+		t.Fatalf("lane content is a peer's reply: %q", content)
 	}
 }

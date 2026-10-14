@@ -52,7 +52,11 @@ func (i *Instance) sweepDuplicateToolSessions() {
 
 	switch {
 	case IsClaudeCompatible(i.Tool) && i.ClaudeSessionID != "":
-		killDuplicateSessionsFn("CLAUDE_SESSION_ID", i.ClaudeSessionID, keepName)
+		// A disk-scanned id may be another session's conversation, and it never
+		// resumes here, so no second process can be fighting over it.
+		if id := i.recordedClaudeSessionID(); id != "" {
+			killDuplicateSessionsFn("CLAUDE_SESSION_ID", id, keepName)
+		}
 	case i.Tool == "gemini" && i.GeminiSessionID != "":
 		killDuplicateSessionsFn("GEMINI_SESSION_ID", i.GeminiSessionID, keepName)
 	case i.Tool == "opencode" && i.OpenCodeSessionID != "":
