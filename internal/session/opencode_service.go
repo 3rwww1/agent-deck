@@ -95,7 +95,12 @@ var (
 
 // openCodeStoppedServiceStatus splits "stopped" into disabled, stalled (registered, alive) and stopped.
 func openCodeStoppedServiceStatus(binary string) (openCodeService, error) {
-	if out, err := runModelProbeCommand(binary, "service", "get", "disabled"); err == nil && strings.TrimSpace(string(out)) == "true" {
+	out, err := runModelProbeCommand(binary, "service", "get", "disabled")
+	if err != nil {
+		// Unknown is not stopped: starting a service the user turned off is the worse mistake.
+		return openCodeService{}, err
+	}
+	if strings.TrimSpace(string(out)) == "true" {
 		return openCodeService{}, errOpenCodeServiceDisabled
 	}
 	return openCodeRegisteredService()
