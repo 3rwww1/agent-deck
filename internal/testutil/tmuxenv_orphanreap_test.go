@@ -50,7 +50,8 @@ func TestIsolateTmuxSocket_ReapsServerOfDeadOwner(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			socket := spawnOrphanedServer(t, tc.sig)
-			if !tmuxServerAnswers(socket) {
+			pid := tmuxPidOnSocket(t, socket)
+			if pid == 0 || !tmuxServerAnswers(socket) {
 				t.Fatalf("no orphaned server on %s after %s; the fixture is broken", socket, tc.name)
 			}
 
@@ -60,8 +61,12 @@ func TestIsolateTmuxSocket_ReapsServerOfDeadOwner(t *testing.T) {
 				t.Fatalf("isolate child: %v: %s", err, out)
 			}
 
-			if tmuxServerAnswers(socket) {
-				t.Fatalf("tmux server on %s survived IsolateTmuxSocket after its owner died by %s", socket, tc.name)
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) && processAlive(pid) {
+				time.Sleep(50 * time.Millisecond)
+			}
+			if processAlive(pid) {
+				t.Fatalf("tmux server pid %d on %s survived IsolateTmuxSocket after its owner died by %s", pid, socket, tc.name)
 			}
 		})
 	}
@@ -93,7 +98,13 @@ func spawnOrphanedServer(t *testing.T, sig syscall.Signal) string {
 	if socket == "" {
 		t.Fatal("spawn child printed no socket")
 	}
+	serverPID := tmuxPidOnSocket(t, socket)
 	t.Cleanup(func() {
+		if serverPID > 0 && processAlive(serverPID) {
+			if proc, err := os.FindProcess(serverPID); err == nil {
+				_ = proc.Kill()
+			}
+		}
 		cmd := exec.Command("tmux", "-S", socket, "kill-server")
 		cmd.Env = envWithoutTmuxVars()
 		_ = cmd.Run()

@@ -1,6 +1,9 @@
 package testutil
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -32,5 +35,33 @@ func TestOwnerPIDFromDirName(t *testing.T) {
 				t.Errorf("ownerPIDFromDirName(%q, %q) = %d, want %d", tc.name, prefix, got, want)
 			}
 		}
+	}
+}
+
+func TestReapDeadOwnerTmuxDirs_SkipsSymlink(t *testing.T) {
+	base := shortTmuxTmpBase()
+	if base == "" {
+		t.Skip("no short tmp base")
+	}
+	deadPID := 0
+	for pid := 4_000_000; pid > 3_000_000; pid-- {
+		if !pidAlive(pid) {
+			deadPID = pid
+			break
+		}
+	}
+	if deadPID == 0 {
+		t.Skip("no dead pid found")
+	}
+	link := filepath.Join(base, fmt.Sprintf("ad-tmux-%d-1", deadPID))
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+
+	reapDeadOwnerTmuxDirs()
+
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("reaper acted on symlink %s: %v", link, err)
 	}
 }

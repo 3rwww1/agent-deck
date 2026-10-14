@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -326,7 +327,7 @@ func reapDeadOwnerTmuxDirs() {
 				}
 				seen[dir] = true
 				pid := ownerPIDFromDirName(filepath.Base(dir), prefix)
-				if pid == 0 || pidAlive(pid) {
+				if pid == 0 || pidAlive(pid) || !ownPlainDir(dir) {
 					continue
 				}
 				KillTmuxServersUnder(dir)
@@ -336,7 +337,19 @@ func reapDeadOwnerTmuxDirs() {
 	}
 }
 
-// pidAlive mirrors internal/statedb's pidAlive (kill -0).
+// ownPlainDir reports whether dir is a real directory, not a symlink, owned by
+// this uid, so a planted entry cannot steer kill-server at a foreign server.
+func ownPlainDir(dir string) bool {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Getuid()
+}
+
+// pidAlive mirrors internal/statedb's pidAlive (kill -0), but counts EPERM as
+// alive: the process exists, it just belongs to someone else.
 func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -345,15 +358,16 @@ func pidAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // shortTmuxTmpBase returns a short base directory for the per-test TMUX_TMPDIR.
 //
 // UNIX-domain socket paths are capped at sockaddr_un.sun_path (104 chars on
 // darwin, 108 on linux). tmux appends "/tmux-<uid>/<sock>" (~17 chars) to
-// TMUX_TMPDIR, and MkdirTemp's random suffix eats ~10 more, so the base must
-// stay well under ~75 chars. On darwin, os.TempDir() returns
+// TMUX_TMPDIR, and the owner PID plus MkdirTemp's random suffix eat ~18 more,
+// so the base must stay well under ~70 chars. On darwin, os.TempDir() returns
 // /var/folders/<aa>/<32-char-hash>/T (resolved through /private/...) which is
 // ~56 chars and immediately overshoots the limit. /tmp is the well-known short
 // path on every Unix-like OS, matches tmux's own default location, and matches
