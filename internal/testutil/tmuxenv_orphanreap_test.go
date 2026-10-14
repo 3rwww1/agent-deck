@@ -97,7 +97,9 @@ func spawnOrphanedServer(t *testing.T, sig syscall.Signal) string {
 		cmd := exec.Command("tmux", "-S", socket, "kill-server")
 		cmd.Env = envWithoutTmuxVars()
 		_ = cmd.Run()
-		_ = os.RemoveAll(filepath.Dir(socket))
+		if dir := filepath.Dir(socket); strings.HasPrefix(filepath.Base(dir), "ad-sock-") {
+			_ = os.RemoveAll(dir)
+		}
 	})
 	return socket
 }

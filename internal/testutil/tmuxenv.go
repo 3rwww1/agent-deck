@@ -289,7 +289,7 @@ func ownerPIDFromDirName(name, prefix string) int {
 		return 0
 	}
 	pidField, randField, ok := strings.Cut(rest, "-")
-	if !ok || randField == "" || strings.Contains(randField, "-") {
+	if !ok {
 		return 0
 	}
 	if _, err := strconv.ParseUint(randField, 10, 64); err != nil {

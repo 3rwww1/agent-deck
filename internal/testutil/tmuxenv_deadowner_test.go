@@ -1,6 +1,9 @@
 package testutil
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestOwnerPIDFromDirName(t *testing.T) {
 	cases := []struct {
@@ -22,7 +25,7 @@ func TestOwnerPIDFromDirName(t *testing.T) {
 	for _, tc := range cases {
 		for _, prefix := range ownedDirPrefixes {
 			want := 0
-			if len(tc.name) >= len(prefix) && tc.name[:len(prefix)] == prefix {
+			if strings.HasPrefix(tc.name, prefix) {
 				want = tc.want
 			}
 			if got := ownerPIDFromDirName(tc.name, prefix); got != want {
