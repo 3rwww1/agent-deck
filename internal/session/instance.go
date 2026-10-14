@@ -7834,7 +7834,21 @@ func (i *Instance) applyOpenCodeSessionCandidate(candidate string) bool {
 		i.mu.Unlock()
 		return false
 	}
+	ownTmuxName := ""
+	if i.tmuxSession != nil {
+		ownTmuxName = i.tmuxSession.Name
+	}
+	i.mu.Unlock()
 
+	// The restart sweep kills every other pane carrying the id, so taking a sibling's id kills the sibling.
+	if openCodeSessionHeldElsewhere(candidate, ownTmuxName) {
+		sessionLog.Warn("opencode_session_candidate_held_elsewhere",
+			slog.String("instance_id", i.ID),
+			slog.String("session_id", candidate))
+		return false
+	}
+
+	i.mu.Lock()
 	if i.OpenCodeSessionID != "" {
 		lastActivity := i.GetLastActivityTime()
 		if !lastActivity.IsZero() && time.Since(lastActivity) <= opencodeRotationActivityWindow {
