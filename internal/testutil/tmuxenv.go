@@ -5,7 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 )
 
 // Name of the marker env var set during test isolation. Runtime guards in
@@ -65,7 +67,9 @@ func IsolateTmuxSocket() func() {
 	_ = os.Unsetenv("TMUX")
 	_ = os.Unsetenv("TMUX_PANE")
 
-	dir, err := os.MkdirTemp(shortTmuxTmpBase(), "ad-tmux-")
+	reapDeadOwnerTmuxDirs()
+
+	dir, err := os.MkdirTemp(shortTmuxTmpBase(), ownedDirPattern("ad-tmux-"))
 	if err != nil {
 		// If we can't isolate via MkdirTemp, we still want tests to
 		// run — but we REALLY don't want them on the default socket.
@@ -245,7 +249,7 @@ func envWithoutTmuxVars() []string {
 //	socket, cleanup := testutil.ShortTmuxSocket()
 //	t.Cleanup(cleanup)
 func ShortTmuxSocket() (socket string, cleanup func()) {
-	dir, err := os.MkdirTemp(shortTmuxTmpBase(), "ad-sock-")
+	dir, err := os.MkdirTemp(shortTmuxTmpBase(), ownedDirPattern("ad-sock-"))
 	if err != nil {
 		// Primary MkdirTemp failed. Retry directly under /tmp so each call
 		// still gets a UNIQUE dir (MkdirTemp's random suffix) that fits
@@ -263,6 +267,85 @@ func ShortTmuxSocket() (socket string, cleanup func()) {
 		KillTmuxServersUnder(dir)
 		_ = os.RemoveAll(dir)
 	}
+}
+
+// ownedDirPrefixes are the isolated-dir prefixes whose names carry the owning
+// test binary's PID, so a later run can tell an orphan from a live sibling.
+var ownedDirPrefixes = []string{"ad-sock-", "ad-tmux-"}
+
+// ownedDirPattern returns the MkdirTemp pattern <prefix><pid>-*, so the owner
+// PID is in the name from the atomic create onward.
+func ownedDirPattern(prefix string) string {
+	return fmt.Sprintf("%s%d-*", prefix, os.Getpid())
+}
+
+// ownerPIDFromDirName parses the owner PID from a <prefix><pid>-<rand> name.
+// It returns 0 for any other shape. Legacy names (<prefix><rand>) MUST NOT
+// parse: the random suffix is not a live PID, so kill -0 would fail and a
+// still-running old-format test binary would have its servers reaped.
+func ownerPIDFromDirName(name, prefix string) int {
+	rest, ok := strings.CutPrefix(name, prefix)
+	if !ok {
+		return 0
+	}
+	pidField, randField, ok := strings.Cut(rest, "-")
+	if !ok || randField == "" || strings.Contains(randField, "-") {
+		return 0
+	}
+	if _, err := strconv.ParseUint(randField, 10, 64); err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(pidField)
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+// reapDeadOwnerTmuxDirs kills the servers in, then removes, every isolated dir
+// whose owning test binary is dead.
+//
+// t.Cleanup and TestMain defers never run on SIGKILL, on the `go test -timeout`
+// panic, or on default SIGINT/SIGTERM handling, and a `new-session -d` server
+// daemonizes past its test binary. This sweep is the only cleanup that does not
+// depend on how the owner died: the next run on the host reaps it. Dirs with a
+// live owner (a sibling package binary under `go test ./...`) and dirs with no
+// parseable owner are left alone, and nothing is ever reaped by age.
+func reapDeadOwnerTmuxDirs() {
+	bases := []string{os.TempDir()}
+	if short := shortTmuxTmpBase(); short != "" {
+		bases = append(bases, short)
+	}
+	seen := make(map[string]bool)
+	for _, base := range bases {
+		for _, prefix := range ownedDirPrefixes {
+			matches, _ := filepath.Glob(filepath.Join(base, prefix+"*"))
+			for _, dir := range matches {
+				if seen[dir] {
+					continue
+				}
+				seen[dir] = true
+				pid := ownerPIDFromDirName(filepath.Base(dir), prefix)
+				if pid == 0 || pidAlive(pid) {
+					continue
+				}
+				KillTmuxServersUnder(dir)
+				_ = os.RemoveAll(dir)
+			}
+		}
+	}
+}
+
+// pidAlive mirrors internal/statedb's pidAlive (kill -0).
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 // shortTmuxTmpBase returns a short base directory for the per-test TMUX_TMPDIR.
