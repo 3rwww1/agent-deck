@@ -3881,16 +3881,22 @@ func (h *Home) reconcileLivePipes() {
 	// Snapshot live instances: session name -> socket (the source of truth).
 	// nameToID feeds only the claim-polling ownership filter below; don't
 	// build it on every 500ms tick when the flag is off.
-	h.instancesMu.RLock()
-	socketByName := make(map[string]string, len(h.instances))
+	// Copied out of instancesMu: the status read below takes inst.mu, which a kill holds across tmux calls.
+	instances := h.snapshotInstances()
+
+	socketByName := make(map[string]string, len(instances))
 	var nameToID map[string]string
 	if h.claimPolling {
-		nameToID = make(map[string]string, len(h.instances))
+		nameToID = make(map[string]string, len(instances))
 	}
-	sockets := make([]string, 0, len(h.instances))
-	socketSeen := make(map[string]bool, len(h.instances))
-	for _, inst := range h.instances {
+	sockets := make([]string, 0, len(instances))
+	socketSeen := make(map[string]bool, len(instances))
+	for _, inst := range instances {
 		if ts := inst.GetTmuxSession(); ts != nil {
+			// Attaching to a stopped row whose tmux session is gone can only fail.
+			if inst.GetStatusThreadSafe() == session.StatusStopped && !ts.ExistsCached() {
+				continue
+			}
 			socketByName[ts.Name] = inst.TmuxSocketName
 			if nameToID != nil {
 				nameToID[ts.Name] = inst.ID
@@ -3901,7 +3907,6 @@ func (h *Home) reconcileLivePipes() {
 			}
 		}
 	}
-	h.instancesMu.RUnlock()
 
 	h.focusMu.Lock()
 	focused := h.focusedSessionName
@@ -25106,8 +25111,9 @@ const maxTransferSize = 500 * 1024 // 500KB max for inter-session transfer
 
 // copySessionOutput returns a tea.Cmd that copies the session's last response to clipboard.
 func (h *Home) copySessionOutput(inst *session.Instance) tea.Cmd {
+	peers := h.snapshotInstances()
 	return func() tea.Msg {
-		content, err := getSessionContent(inst)
+		content, err := getSessionContent(inst, peers)
 		if err != nil {
 			return copyResultMsg{err: err}
 		}
@@ -25126,8 +25132,9 @@ func (h *Home) copySessionOutput(inst *session.Instance) tea.Cmd {
 
 // sendOutputToSession returns a tea.Cmd that sends the source session's output to the target.
 func (h *Home) sendOutputToSession(source, target *session.Instance) tea.Cmd {
+	peers := h.snapshotInstances()
 	return func() tea.Msg {
-		content, err := getSessionContent(source)
+		content, err := getSessionContent(source, peers)
 		if err != nil {
 			return sendOutputResultMsg{
 				targetTitle: target.Title,
@@ -25632,18 +25639,18 @@ func (h *Home) getOtherActiveSessions(excludeID string) []*session.Instance {
 //
 // Falls back to tmux scrollback capture when structured response lookup
 // returns no content.
-func getSessionContent(inst *session.Instance) (string, error) {
+func getSessionContent(inst *session.Instance, peers []*session.Instance) (string, error) {
 	var live string
 	if session.IsClaudeCompatible(inst.Tool) {
 		live = inst.GetSessionIDFromTmux()
 	}
-	return getSessionContentWithLive(inst, live)
+	return getSessionContentWithLive(inst, live, peers)
 }
 
 // getSessionContentWithLive is the testable core: given a live Claude session
 // ID (may be empty), prefer it over any stored ID before reading the last
 // response, then fall back to tmux scrollback.
-func getSessionContentWithLive(inst *session.Instance, liveClaudeID string) (string, error) {
+func getSessionContentWithLive(inst *session.Instance, liveClaudeID string, peers []*session.Instance) (string, error) {
 	if session.IsClaudeCompatible(inst.Tool) && liveClaudeID != "" && liveClaudeID != inst.ClaudeSessionID {
 		inst.ClaudeSessionID = liveClaudeID
 		// #1815: read from this session's OWN pane env — weak vouch.
@@ -25652,7 +25659,7 @@ func getSessionContentWithLive(inst *session.Instance, liveClaudeID string) (str
 
 	// Use best-effort: richer recovery than GetLastResponse if the refreshed
 	// ID still doesn't resolve to a readable JSONL.
-	if resp, err := inst.GetLastResponseBestEffort(); err == nil && resp != nil && resp.Content != "" {
+	if resp, err := inst.GetLastResponseBestEffort(peers...); err == nil && resp != nil && resp.Content != "" {
 		return resp.Content, nil
 	}
 

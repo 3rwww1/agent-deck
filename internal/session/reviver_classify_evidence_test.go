@@ -49,6 +49,7 @@ func TestReviver_Classify_LogsEvidenceForErroredSession(t *testing.T) {
 	for key, want := range map[string]string{
 		"tmux_alive":    "true",
 		"pipe_alive":    "false",
+		"pipe_wanted":   "true",
 		"stored_status": string(StatusError),
 		"class":         "errored",
 		"title":         "evidence-errored",
