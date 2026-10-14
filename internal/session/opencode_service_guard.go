@@ -45,7 +45,7 @@ type openCodeServiceGuard struct {
 	unhealthySince time.Time
 	lastFailedAt   time.Time
 	disabled       bool
-	outages        atomic.Int64 // failed checks, read without waiting on a check in flight
+	outages        atomic.Int64 // checks that found the service stopped or silent, read without waiting on a check in flight
 
 	now        func() time.Time
 	lockDir    func() (string, error)
@@ -81,9 +81,6 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 	if svc, ok := g.check(binary); ok {
 		return svc, true
 	}
-	if !g.disabled {
-		g.outages.Add(1)
-	}
 	// Lanes in one status sweep share a failed verdict instead of each probing.
 	if retry := g.now().Add(openCodeServiceRetryGap); retry.After(g.retryAt) {
 		g.retryAt = retry
@@ -105,6 +102,10 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 		if err = g.probe(svc); err == nil {
 			return g.markHealthy(svc), true
 		}
+	}
+	// Only these drop the TUIs' connections; a rejected probe or a slow CLI leaves them be.
+	if errors.Is(err, errOpenCodeServiceStopped) || errors.Is(err, errOpenCodeServiceSilent) {
+		g.outages.Add(1)
 	}
 
 	var action string

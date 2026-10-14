@@ -140,3 +140,21 @@ func TestOpenCodePaneWatched_CountsEveryAttachedClient(t *testing.T) {
 		t.Fatal("lane whose clients cannot be read counted as unwatched")
 	}
 }
+
+// The route watch reads outages: only a stopped or silent service drops the TUIs' connections.
+func TestOpenCodeServiceGuard_CountsOnlyStoppedOrSilentAsOutage(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+	fake.rejects.Store(true)
+	g := fake.guard(t.TempDir())
+	g.attach("opencode")
+	if got := g.outages.Load(); got != 0 {
+		t.Fatalf("outages after a rejected probe = %d, want 0", got)
+	}
+
+	fake.rejects.Store(false)
+	fake.advance(time.Minute)
+	g.attach("opencode")
+	if got := g.outages.Load(); got != 1 {
+		t.Fatalf("outages after a silent probe = %d, want 1", got)
+	}
+}
