@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -44,6 +45,7 @@ type openCodeServiceGuard struct {
 	unhealthySince time.Time
 	lastFailedAt   time.Time
 	disabled       bool
+	outages        atomic.Int64 // failed checks, read without waiting on a check in flight
 
 	now        func() time.Time
 	lockDir    func() (string, error)
@@ -78,6 +80,9 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 	}
 	if svc, ok := g.check(binary); ok {
 		return svc, true
+	}
+	if !g.disabled {
+		g.outages.Add(1)
 	}
 	// Lanes in one status sweep share a failed verdict instead of each probing.
 	if retry := g.now().Add(openCodeServiceRetryGap); retry.After(g.retryAt) {

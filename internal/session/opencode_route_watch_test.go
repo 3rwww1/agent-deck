@@ -11,8 +11,8 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
-// A service restart leaves an attached TUI on its home screen: the lane is reopened once, and only then.
-func TestOpenCodeRouteWatch_ReopensLaneThatLostItsSessionOnServiceRestart(t *testing.T) {
+// A TUI that lost its session on a reconnect sits on its home screen: the lane is reopened once per disruption.
+func TestOpenCodeRouteWatch_ReopensLaneThatLostItsSessionOnReconnect(t *testing.T) {
 	pinOpenCodeMajorVersion(t, 2, true)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -40,7 +40,7 @@ func TestOpenCodeRouteWatch_ReopensLaneThatLostItsSessionOnServiceRestart(t *tes
 			t.Fatal(err)
 		}
 	}
-	useFreshOpenCodeServiceGuard(t)
+	guard := useFreshOpenCodeServiceGuard(t)
 
 	started := time.Now().Add(-2 * openCodeRouteSettle)
 	lane := func(id, sessionID string) *Instance {
@@ -85,12 +85,19 @@ func TestOpenCodeRouteWatch_ReopensLaneThatLostItsSessionOnServiceRestart(t *tes
 	sweep("home twice after a service restart", map[string]int{"titled": 1})
 	sweep("still home under the same service", map[string]int{"titled": 1})
 
+	show("OC | Fix the login page")
+	sweep("back on their sessions after the reopen", map[string]int{"titled": 1})
+	guard.outages.Add(1)
+	show(openCodeHomeTitle)
+	sweep("home once after a failed check, same service", map[string]int{"titled": 1})
+	sweep("home twice after a failed check, same service", map[string]int{"titled": 2})
+
 	if err := os.Remove(stateHome + "/opencode/service.json"); err != nil {
 		t.Fatal(err)
 	}
 	show("OC | Fix the login page")
-	sweep("service gone", map[string]int{"titled": 1})
+	sweep("service gone", map[string]int{"titled": 2})
 	show(openCodeHomeTitle)
-	sweep("home with no service, once", map[string]int{"titled": 1})
-	sweep("home with no service, twice", map[string]int{"titled": 1})
+	sweep("home with no service, once", map[string]int{"titled": 2})
+	sweep("home with no service, twice", map[string]int{"titled": 2})
 }

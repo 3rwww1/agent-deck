@@ -11,8 +11,8 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
-// An attached 2.x TUI can come back from a service restart on its home screen,
-// off the session the lane is bound to, and stays there.
+// An attached 2.x TUI that fails to re-read its session on a reconnect (a
+// service restart, stall or overload) falls back to its home screen and stays.
 
 const (
 	openCodeHomeTitle = "OpenCode"
@@ -32,8 +32,9 @@ type openCodeRouteWatch struct {
 }
 
 type openCodeRouteLane struct {
-	servicePID int  // the service the lane last showed its session under; 0 is unknown
-	homeSeen   bool // the previous sweep saw the home title too
+	servicePID int   // the service the lane last showed its session under; 0 is unknown
+	outages    int64 // the guard's failed checks at that time
+	homeSeen   bool  // the previous sweep saw the home title too
 }
 
 var sharedOpenCodeRouteWatch = newOpenCodeRouteWatch()
@@ -53,6 +54,7 @@ func ReopenLostOpenCodeRoutes(instances []*Instance) {
 
 func (w *openCodeRouteWatch) sweep(instances []*Instance) {
 	pid := liveOpenCodeServicePID()
+	outages := sharedOpenCodeService.outages.Load()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for _, inst := range instances {
@@ -65,15 +67,16 @@ func (w *openCodeRouteWatch) sweep(instances []*Instance) {
 		}
 		lane := w.lanes[inst.ID]
 		if info.Title != openCodeHomeTitle {
-			w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid}
+			w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid, outages: outages}
 			continue
 		}
-		// Home under the service that last showed the session is the user's own navigation.
-		if pid == 0 || lane.servicePID == pid {
+		// Home with no service change or outage since the lane showed its session is the user's own navigation.
+		if pid == 0 || (lane.servicePID == pid && lane.outages == outages) {
 			continue
 		}
 		if !lane.homeSeen {
-			w.lanes[inst.ID] = openCodeRouteLane{servicePID: lane.servicePID, homeSeen: true}
+			lane.homeSeen = true
+			w.lanes[inst.ID] = lane
 			continue
 		}
 		if !inst.boundOpenCodeSessionTitled() {
@@ -88,7 +91,7 @@ func (w *openCodeRouteWatch) sweep(instances []*Instance) {
 				slog.String("error", err.Error()))
 			continue
 		}
-		w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid}
+		w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid, outages: outages}
 	}
 }
 
