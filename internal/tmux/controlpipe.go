@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -284,23 +285,14 @@ func (cp *ControlPipe) reader() {
 				}
 			} else if strings.HasPrefix(raw, "%error ") {
 				inCapture = false
+				errMsg := controlErrorText(raw, lines)
 				if !isReady {
 					// Handshake got an error (typically "can't find session").
 					// Record the error so NewControlPipe can detect non-existent sessions.
-					parts := strings.Fields(raw)
-					if len(parts) > 3 {
-						cp.handshakeErr = fmt.Errorf("%s", strings.Join(parts[3:], " "))
-					} else {
-						cp.handshakeErr = fmt.Errorf("handshake error: %s", raw)
-					}
+					cp.handshakeErr = errors.New(errMsg)
 					isReady = true
 					cp.readyOnce.Do(func() { close(cp.ready) })
 					continue
-				}
-				errMsg := raw
-				parts := strings.Fields(raw)
-				if len(parts) > 3 {
-					errMsg = strings.Join(parts[3:], " ")
 				}
 				select {
 				case cp.responseCh <- commandResponse{err: fmt.Errorf("tmux error: %s", errMsg)}:
@@ -322,6 +314,15 @@ func (cp *ControlPipe) reader() {
 	if err := scanner.Err(); err != nil {
 		pipeLog.Debug("pipe_scanner_error", slog.String("session", cp.sessionName), slog.String("error", err.Error()))
 	}
+}
+
+// controlErrorText returns tmux's own message: control mode sends it as the
+// guarded lines, and the %error line carries only time, number and flags.
+func controlErrorText(raw string, lines []string) string {
+	if msg := strings.TrimSpace(strings.Join(lines, "\n")); msg != "" {
+		return msg
+	}
+	return raw
 }
 
 // SendCommand sends a command through the control mode pipe and waits for the response.
