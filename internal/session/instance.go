@@ -8676,14 +8676,14 @@ func (i *Instance) LatestCodexTurnGeneration() (string, error) {
 // `session output --stream` (GetJSONLPathChecked: live peers sharing both the
 // session id and the transcript dir), instead of silently returning another
 // session's output. Non-Claude tools and the no-collision case delegate to
-// GetLastResponseBestEffort unchanged.
+// GetLastResponseBestEffort with the same peers.
 func (i *Instance) GetLastResponseBestEffortChecked(peers []*Instance) (*ResponseOutput, error) {
 	if IsClaudeCompatible(i.Tool) {
 		if _, err := i.GetJSONLPathChecked(peers); err != nil {
 			return nil, fmt.Errorf("refusing to read a colliding transcript: %w", err)
 		}
 	}
-	return i.GetLastResponseBestEffort()
+	return i.GetLastResponseBestEffort(peers...)
 }
 
 // responseVersionedFile is the one file the primary last-response read parses
@@ -8765,7 +8765,10 @@ func (i *Instance) GetLastResponseAtVersion(peers []*Instance, version string) (
 // 3. Scan disk for latest session and retry.
 // 4. Fallback to terminal parsing.
 // 5. If still unavailable, return an empty response (no error).
-func (i *Instance) GetLastResponseBestEffort() (*ResponseOutput, error) {
+//
+// peers are the profile's instances: the Claude disk scan never answers with a
+// transcript one of them is bound to.
+func (i *Instance) GetLastResponseBestEffort(peers ...*Instance) (*ResponseOutput, error) {
 	if IsCodexCompatible(i.Tool) {
 		// Prefer the exact rollout response, avoiding a tmux subprocess on the
 		// normal local path. On failure, retain the historical terminal fallback.
@@ -8817,7 +8820,7 @@ func (i *Instance) GetLastResponseBestEffort() (*ResponseOutput, error) {
 		// alone is sufficient and rollover recovery must not be blocked by
 		// the bound id's own file having not appeared yet.
 		if !i.LastStartedAt.IsZero() || i.GetJSONLPath() != "" {
-			if id, recovered := i.findLatestClaudeTranscriptOnDisk(); recovered != nil {
+			if id, recovered := i.findLatestClaudeTranscriptOnDisk(peers...); recovered != nil {
 				// #1815: this is an mtime-based disk scan — the same evidence
 				// class as the restart discovery prelude, and in a shared working
 				// directory the newest transcript can belong to another session.
@@ -9301,6 +9304,17 @@ func (i *Instance) getClaudeLastResponse() (*ResponseOutput, error) {
 	return parseClaudeLastAssistantMessage(data, filepath.Base(sessionFile))
 }
 
+// claudeSessionsOwnedByPeers lists, lowercased, the Claude transcripts other sessions are bound to.
+func claudeSessionsOwnedByPeers(inst *Instance, peers []*Instance) map[string]bool {
+	owned := map[string]bool{}
+	for _, p := range peers {
+		if p != nil && p.ID != inst.ID && p.ClaudeSessionID != "" {
+			owned[strings.ToLower(p.ClaudeSessionID)] = true
+		}
+	}
+	return owned
+}
+
 // findLatestClaudeTranscriptOnDisk scans the instance's Claude project directory
 // for the most recently modified transcript that carries a real (non-sidechain)
 // assistant message, returning its session ID and parsed response.
@@ -9322,7 +9336,7 @@ func (i *Instance) getClaudeLastResponse() (*ResponseOutput, error) {
 // kills it — #1851's data loss, reached past the restart bail-out (which returns
 // early once ClaudeSessionID is non-empty). Hence the same unconditional gate the
 // other two doors have.
-func (i *Instance) findLatestClaudeTranscriptOnDisk() (string, *ResponseOutput) {
+func (i *Instance) findLatestClaudeTranscriptOnDisk(peers ...*Instance) (string, *ResponseOutput) {
 	if !i.TranscriptIsResolvableLocally() {
 		return "", nil
 	}
@@ -9359,6 +9373,8 @@ func (i *Instance) findLatestClaudeTranscriptOnDisk() (string, *ResponseOutput) 
 		})
 	}
 
+	peerBound := claudeSessionsOwnedByPeers(i, peers)
+
 	// Newest first; the current conversation is the most recently written file
 	// that still contains a real assistant reply.
 	sort.Slice(candidates, func(a, b int) bool {
@@ -9378,6 +9394,10 @@ func (i *Instance) findLatestClaudeTranscriptOnDisk() (string, *ResponseOutput) 
 		// means "unknown" and does not filter, preserving prior recovery
 		// behavior for those records.
 		if !i.LastStartedAt.IsZero() && c.mod.Before(i.LastStartedAt) {
+			continue
+		}
+		// A peer's bound transcript is its conversation, never this one's rollover.
+		if peerBound[strings.ToLower(c.id)] {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(projectDir, c.id+".jsonl"))
@@ -13764,7 +13784,8 @@ func randomString(length int) string {
 }
 
 // UpdateClaudeSessionsWithDedup clears duplicate Claude session IDs across instances.
-// The oldest session (by CreatedAt) keeps its ID, newer duplicates are cleared.
+// A recorded claim keeps its ID over a disk-scanned one, then the oldest session
+// (by CreatedAt) wins; the other duplicates are cleared.
 // With tmux env being authoritative, duplicates shouldn't occur in normal use,
 // but we handle them defensively for loaded/migrated sessions.
 func UpdateClaudeSessionsWithDedup(instances []*Instance) {
@@ -13772,23 +13793,30 @@ func UpdateClaudeSessionsWithDedup(instances []*Instance) {
 	ordered := make([]*Instance, len(instances))
 	copy(ordered, instances)
 
-	// Sort instances by CreatedAt (older first get priority for keeping IDs).
+	recorded := make(map[*Instance]bool, len(ordered))
+	for _, inst := range ordered {
+		recorded[inst] = inst.recordedClaudeSessionID() != ""
+	}
+	// Recorded claims first, then older sessions, get priority for keeping IDs.
 	sort.SliceStable(ordered, func(i, j int) bool {
+		if ri, rj := recorded[ordered[i]], recorded[ordered[j]]; ri != rj {
+			return ri
+		}
 		return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
 	})
 
-	// Find and clear duplicate IDs (keep only the oldest session's claim)
+	// Find and clear duplicate IDs (keep only the first claim in that order)
 	idOwner := make(map[string]*Instance)
 	for _, inst := range ordered {
 		if !IsClaudeCompatible(inst.Tool) || inst.ClaudeSessionID == "" {
 			continue
 		}
 		if owner, exists := idOwner[inst.ClaudeSessionID]; exists {
-			// Duplicate found! The older session (owner) keeps the ID
-			// Clear the newer session's ID (it will get a new one from tmux env)
+			// Duplicate found! The owner, earlier in that order, keeps the ID
+			// Clear this session's ID (it will get a new one from tmux env)
 			inst.ClaudeSessionID = ""
 			inst.ClaudeDetectedAt = time.Time{}
-			_ = owner // Older session keeps its ID
+			_ = owner // Owner keeps its ID
 		} else {
 			idOwner[inst.ClaudeSessionID] = inst
 		}
