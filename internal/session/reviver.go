@@ -9,9 +9,9 @@ import (
 
 // RevivalClass categorizes an Instance's recoverability at scan time.
 //
-//   - ClassAlive    — tmux session exists AND our control pipe is alive.
-//     The session is healthy; no action needed.
-//   - ClassErrored  — tmux session exists but the control pipe is dead (or
+//   - ClassAlive    — tmux session exists AND our control pipe is alive or
+//     not wanted. The session is healthy; no action needed.
+//   - ClassErrored  — tmux session exists but a wanted control pipe is dead (or
 //     Status == StatusError). Likely cause: SSH logout killed our inherited
 //     pipe but the tmux server survived under its own user scope. Revivable.
 //   - ClassDead     — tmux session does not exist. Server gone (OOM, reboot,
@@ -67,8 +67,10 @@ type Reviver struct {
 	// targets the right tmux server. Sessions created under an isolated
 	// socket (Instance.TmuxSocketName != "") would otherwise appear "dead"
 	// on the default server and the reviver would wrongly mark them gone.
-	TmuxExists   func(name, socketName string) bool
-	PipeAlive    func(name string) bool
+	TmuxExists func(name, socketName string) bool
+	PipeAlive  func(name string) bool
+	// A missing pipe the PipeManager never wanted is not a dead session; nil wants every pipe.
+	PipeWanted   func(name string) bool
 	ReviveAction func(*Instance) error
 	Stagger      time.Duration
 	Log          *slog.Logger
@@ -108,6 +110,7 @@ func NewReviver() *Reviver {
 	return &Reviver{
 		TmuxExists:   defaultTmuxExists,
 		PipeAlive:    defaultPipeAlive,
+		PipeWanted:   defaultPipeWanted,
 		ReviveAction: defaultReviveAction,
 		Stagger:      500 * time.Millisecond,
 		Log:          sessionLog,
@@ -144,18 +147,20 @@ func (r *Reviver) Classify(inst *Instance) RevivalClass {
 	// a log line that omits it cannot answer "was the session actually dead?" after
 	// the fact. IsConnected is an in-memory map lookup, so this costs nothing.
 	pipeAlive := false
+	pipeWanted := true
 	if tmuxAlive && r.PipeAlive != nil {
 		pipeAlive = r.PipeAlive(name)
+		pipeWanted = r.wantsPipe(name)
 	}
 
 	class := ClassAlive
 	switch {
 	case !tmuxAlive:
 		class = ClassDead
-	case inst.Status == StatusError || !pipeAlive:
+	case inst.Status == StatusError || (!pipeAlive && pipeWanted):
 		class = ClassErrored
 	}
-	r.logClassify(inst, name, tmuxAlive, pipeAlive, class)
+	r.logClassify(inst, name, tmuxAlive, pipeAlive, pipeWanted, class)
 	return class
 }
 
@@ -168,7 +173,7 @@ func (r *Reviver) Classify(inst *Instance) RevivalClass {
 // control-pipe reading, the stored status it was judged against, and when. Alive
 // verdicts stay at debug level; they are the overwhelming majority and carry no
 // diagnostic value.
-func (r *Reviver) logClassify(inst *Instance, name string, tmuxAlive, pipeAlive bool, class RevivalClass) {
+func (r *Reviver) logClassify(inst *Instance, name string, tmuxAlive, pipeAlive, pipeWanted bool, class RevivalClass) {
 	if r.Log == nil {
 		return
 	}
@@ -178,6 +183,7 @@ func (r *Reviver) logClassify(inst *Instance, name string, tmuxAlive, pipeAlive 
 		slog.String("tmux_session", name),
 		slog.Bool("tmux_alive", tmuxAlive),
 		slog.Bool("pipe_alive", pipeAlive),
+		slog.Bool("pipe_wanted", pipeWanted),
 		slog.String("stored_status", string(inst.Status)),
 		slog.String("class", class.String()),
 		slog.Time("sampled_at", time.Now()),
@@ -236,6 +242,10 @@ func (r *Reviver) ReviveOne(inst *Instance) ReviveOutcome {
 	return r.reviveOneInternal(inst, classes[0], &first)
 }
 
+func (r *Reviver) wantsPipe(name string) bool {
+	return r.PipeWanted == nil || r.PipeWanted(name)
+}
+
 // pipeDeadOnly reports whether class rests on the pipe reading alone: the
 // server is up and the stored status did not already decide the verdict.
 func pipeDeadOnly(inst *Instance, class RevivalClass) bool {
@@ -265,12 +275,18 @@ func (r *Reviver) confirmPipeDead(instances []*Instance, classes []RevivalClass)
 	sleep(r.ConfirmAfter)
 	for _, i := range pending {
 		inst := instances[i]
-		if !r.PipeAlive(instanceTmuxName(inst)) {
+		name := instanceTmuxName(inst)
+		event := "reviver_pipe_dead_transient"
+		switch {
+		case r.PipeAlive(name):
+		case !r.wantsPipe(name):
+			event = "reviver_pipe_unwanted"
+		default:
 			continue
 		}
 		classes[i] = ClassAlive
 		if r.Log != nil {
-			r.Log.Info("reviver_pipe_dead_transient",
+			r.Log.Info(event,
 				slog.String("title", inst.Title),
 				slog.String("instance_id", inst.ID),
 				slog.Duration("confirm_after", r.ConfirmAfter))
@@ -386,6 +402,15 @@ func defaultPipeAlive(name string) bool {
 		return false
 	}
 	return pm.IsConnected(name)
+}
+
+// Without a manager (CLI one-shot) every pipe counts as wanted.
+func defaultPipeWanted(name string) bool {
+	pm := tmux.GetPipeManager()
+	if pm == nil {
+		return true
+	}
+	return pm.Wants(name)
 }
 
 // defaultReviveAction re-establishes the control pipe for an errored instance.

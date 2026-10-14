@@ -103,7 +103,7 @@ func (b *ReviveBreaker) OnClassify(id, title string, class RevivalClass) bool {
 
 	switch class {
 	case ClassAlive:
-		// Genuine recovery — wipe all breaker state for this session.
+		// Recovered, or no pipe wanted any more — wipe all breaker state for this session.
 		delete(b.entries, id)
 		return true
 	case ClassDead:
