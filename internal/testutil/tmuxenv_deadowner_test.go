@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/asheshgoplani/agent-deck/internal/procowner"
 )
 
 func TestOwnerPIDFromDirName(t *testing.T) {
@@ -45,16 +47,7 @@ func TestReapDeadOwnerTmuxDirs_SkipsSymlink(t *testing.T) {
 	if base == "" {
 		t.Skip("no short tmp base")
 	}
-	deadPID := 0
-	for pid := 4_000_000; pid > 3_000_000; pid-- {
-		if !processAlive(pid) {
-			deadPID = pid
-			break
-		}
-	}
-	if deadPID == 0 {
-		t.Skip("no dead pid found")
-	}
+	deadPID := findDeadPID(t)
 	link := filepath.Join(base, fmt.Sprintf("ad-tmux-%d-1", deadPID))
 	if err := os.Symlink(t.TempDir(), link); err != nil {
 		t.Fatal(err)
@@ -109,5 +102,38 @@ func TestTmuxSocketsUnder_SkipsSymlinkedSubdir(t *testing.T) {
 	}
 	if got := tmuxSocketsUnder(dir); len(got) != 0 {
 		t.Fatalf("tmuxSocketsUnder followed a symlinked subdir: %v", got)
+	}
+}
+
+func findDeadPID(t *testing.T) int {
+	t.Helper()
+	for pid := 4_000_000; pid > 3_000_000; pid-- {
+		if !procowner.Alive(pid) {
+			return pid
+		}
+	}
+	t.Skip("no dead pid found")
+	return 0
+}
+
+func TestReapDeadOwnerTmuxDirs_KeepsDirWithListener(t *testing.T) {
+	dir := filepath.Join(shortTmuxTmpBase(), fmt.Sprintf("ad-sock-%d-1", findDeadPID(t)))
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("unix", filepath.Join(dir, "s"))
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		t.Skipf("cannot listen: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = l.Close()
+		_ = os.RemoveAll(dir)
+	})
+
+	reapDeadOwnerTmuxDirs()
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("reaper removed %s while a server still listened on it: %v", dir, err)
 	}
 }
