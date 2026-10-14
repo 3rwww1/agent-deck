@@ -3215,6 +3215,11 @@ func (i *Instance) queryOpenCodeSession() string {
 	i.mu.RUnlock()
 
 	sharedService := port == 0 && i.openCodeRejectsV1LaunchFlags()
+	if sharedService && currentID != "" {
+		// A bound 2.x instance never rotates to a sibling, so the only question
+		// is whether its session still exists, wherever session_move put it.
+		return i.queryBoundOpenCodeServiceSession(projectPath, currentID)
+	}
 	var minCreated int64
 	if sharedService && currentID == "" {
 		// OpenCodeStartedAt is not persisted, so a reloaded instance falls back to its last start.
