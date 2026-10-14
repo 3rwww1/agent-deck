@@ -13766,7 +13766,8 @@ func randomString(length int) string {
 }
 
 // UpdateClaudeSessionsWithDedup clears duplicate Claude session IDs across instances.
-// The oldest session (by CreatedAt) keeps its ID, newer duplicates are cleared.
+// A recorded claim keeps its ID over a disk-scanned one, then the oldest session
+// (by CreatedAt) wins; the other duplicates are cleared.
 // With tmux env being authoritative, duplicates shouldn't occur in normal use,
 // but we handle them defensively for loaded/migrated sessions.
 func UpdateClaudeSessionsWithDedup(instances []*Instance) {
@@ -13774,8 +13775,7 @@ func UpdateClaudeSessionsWithDedup(instances []*Instance) {
 	ordered := make([]*Instance, len(instances))
 	copy(ordered, instances)
 
-	// Sort instances by CreatedAt (older first get priority for keeping IDs).
-	// A disk-scanned claim never evicts the session that recorded the id.
+	// Recorded claims first, then older sessions, get priority for keeping IDs.
 	sort.SliceStable(ordered, func(i, j int) bool {
 		if ri, rj := ordered[i].recordedClaudeSessionID() != "", ordered[j].recordedClaudeSessionID() != ""; ri != rj {
 			return ri
