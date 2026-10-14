@@ -2244,7 +2244,7 @@ func handleSessionSet(profile string, args []string) {
 		fmt.Println("  claude-session-id  Claude conversation ID")
 		fmt.Println("  favorite           Favourite flag: true or false (favorite in list/show --json)")
 		fmt.Println("  gemini-session-id  Gemini conversation ID")
-		fmt.Println("  opencode-session-id OpenCode session ID (empty clears it)")
+		fmt.Println("  opencode-session-id OpenCode session ID (empty clears it; refused if another session holds it)")
 		fmt.Println("  tool-session-id    Custom [tools.*] conversation ID (for resume_flag after reboot)")
 		fmt.Println("  account            Named account slot (#924) — resolves via [profiles.<account>.claude].config_dir; restart required")
 		fmt.Println("  idle-timeout       Auto-stop after no tmux output for this duration (#1143; Go duration: 30m, 1h, 24h; 0 disables)")
@@ -2334,6 +2334,12 @@ func handleSessionSet(profile string, args []string) {
 	// `rename`, naming the existing session's ID so the user can act on it.
 	if field == session.FieldTitle {
 		if msg, code := checkTitleConflict(instances, inst, value); msg != "" {
+			out.Error(msg, code)
+			exitCLI(1)
+		}
+	}
+	if field == session.FieldOpenCodeSessionID {
+		if msg, code := checkOpenCodeSessionConflict(instances, inst, value); msg != "" {
 			out.Error(msg, code)
 			exitCLI(1)
 		}
