@@ -81,8 +81,8 @@ func NewReviveBreaker(log *slog.Logger) *ReviveBreaker {
 // OnClassify records this sweep's classification for an instance and returns
 // whether a revive should be attempted (only meaningful for ClassErrored).
 //
-//   - ClassAlive  → full reset (the session actually recovered). Returns true
-//     but the caller ignores it for non-errored classes.
+//   - ClassAlive  → full reset (the session recovered, or no pipe is wanted
+//     any more). Returns true but the caller ignores it for non-errored classes.
 //   - ClassDead   → no attempt, counters untouched (a gone server is a
 //     different condition; an errored↔dead flap must not lose futility state).
 //   - ClassErrored → if a revive from a prior sweep is pending verification and
@@ -103,7 +103,7 @@ func (b *ReviveBreaker) OnClassify(id, title string, class RevivalClass) bool {
 
 	switch class {
 	case ClassAlive:
-		// Genuine recovery — wipe all breaker state for this session.
+		// Recovered, or no pipe wanted any more — wipe all breaker state for this session.
 		delete(b.entries, id)
 		return true
 	case ClassDead:
