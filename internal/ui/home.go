@@ -4085,16 +4085,22 @@ func (h *Home) reconcileLivePipes() {
 	// Snapshot live instances: session name -> socket (the source of truth).
 	// nameToID feeds only the claim-polling ownership filter below; don't
 	// build it on every 500ms tick when the flag is off.
-	h.instancesMu.RLock()
-	socketByName := make(map[string]string, len(h.instances))
+	// Copied out of instancesMu: the status read below takes inst.mu, which a kill holds across tmux calls.
+	instances := h.snapshotInstances()
+
+	socketByName := make(map[string]string, len(instances))
 	var nameToID map[string]string
 	if h.claimPolling {
-		nameToID = make(map[string]string, len(h.instances))
+		nameToID = make(map[string]string, len(instances))
 	}
-	sockets := make([]string, 0, len(h.instances))
-	socketSeen := make(map[string]bool, len(h.instances))
-	for _, inst := range h.instances {
+	sockets := make([]string, 0, len(instances))
+	socketSeen := make(map[string]bool, len(instances))
+	for _, inst := range instances {
 		if ts := inst.GetTmuxSession(); ts != nil {
+			// Attaching to a stopped row whose tmux session is gone can only fail.
+			if inst.GetStatusThreadSafe() == session.StatusStopped && !ts.ExistsCached() {
+				continue
+			}
 			socketByName[ts.Name] = inst.TmuxSocketName
 			if nameToID != nil {
 				nameToID[ts.Name] = inst.ID
@@ -4105,7 +4111,6 @@ func (h *Home) reconcileLivePipes() {
 			}
 		}
 	}
-	h.instancesMu.RUnlock()
 
 	h.focusMu.Lock()
 	focused := h.focusedSessionName
