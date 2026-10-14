@@ -3108,8 +3108,8 @@ func findBestOpenCodeSession(sessions []openCodeSessionMetadata, projectPath, cu
 }
 
 // queryOpenCodeSession queries the managed OpenCode HTTP server for sessions
-// matching our project directory. Unbound instances adopt the most recently
-// updated session, while already-bound instances keep their current ID as long
+// matching our project directory. Unbound 1.x instances adopt the most recently
+// updated session (2.x ones never do), while bound instances keep their ID as long
 // as it still exists. Instances without a managed port retain a coalesced,
 // rate-limited CLI compatibility path.
 //
@@ -3131,9 +3131,11 @@ func (i *Instance) queryOpenCodeSession() string {
 	i.mu.RUnlock()
 
 	sharedService := port == 0 && i.openCodeRejectsV1LaunchFlags()
-	if sharedService && currentID != "" {
-		// A bound 2.x instance never rotates to a sibling, so the only question
-		// is whether its session still exists, wherever session_move put it.
+	if sharedService {
+		// Lanes in one directory share the service, so an unbound 2.x lane never guesses its session.
+		if currentID == "" {
+			return ""
+		}
 		return i.queryBoundOpenCodeServiceSession(projectPath, currentID)
 	}
 	var minCreated int64
