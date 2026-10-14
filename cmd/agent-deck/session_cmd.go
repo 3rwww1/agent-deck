@@ -6564,7 +6564,7 @@ func waitForFreshOutput(inst *session.Instance, sentAt time.Time, peers []*sessi
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		resp, err := inst.GetLastResponseBestEffort()
+		resp, err := inst.GetLastResponseBestEffort(peers...)
 		if err != nil {
 			lastErr = err
 			time.Sleep(pollInterval)
