@@ -14,12 +14,13 @@ import (
 )
 
 type stubOpenCodeService struct {
-	mu      sync.Mutex
-	now     time.Time
-	stopped bool
-	answer  atomic.Bool
-	probes  atomic.Int32
-	starts  atomic.Int32
+	mu       sync.Mutex
+	now      time.Time
+	stopped  bool
+	answer   atomic.Bool
+	probes   atomic.Int32
+	starts   atomic.Int32
+	restarts atomic.Int32
 }
 
 func (f *stubOpenCodeService) clock() time.Time {
@@ -50,9 +51,12 @@ func (f *stubOpenCodeService) guard(lockDir string) *openCodeServiceGuard {
 	g.run = func(_, action string) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if action == "start" {
+		switch action {
+		case "start":
 			f.starts.Add(1)
 			f.stopped = false
+		case "restart":
+			f.restarts.Add(1)
 		}
 		return nil
 	}
@@ -93,6 +97,46 @@ func TestOpenCodeServiceGuard_StoppedServiceStartsOnce(t *testing.T) {
 	}
 	if got := fake.starts.Load(); got != 1 {
 		t.Fatalf("starts = %d, want 1", got)
+	}
+}
+
+// A dozen lanes in two processes hit a stall: no restart within the grace, then exactly one.
+func TestOpenCodeServiceGuard_StallRestartsOnceAfterGrace(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+	lockDir := t.TempDir()
+	guards := []*openCodeServiceGuard{fake.guard(lockDir), fake.guard(lockDir)}
+
+	for elapsed := time.Duration(0); elapsed < openCodeServiceStallGrace; elapsed += 30 * time.Second {
+		if got := attachConcurrently(guards, 6); got != 0 {
+			t.Fatalf("attached %d lanes to a stalled service", got)
+		}
+		if got := fake.restarts.Load(); got != 0 {
+			t.Fatalf("restarted %d times %s into a stall, want none before %s", got, elapsed, openCodeServiceStallGrace)
+		}
+		fake.advance(30 * time.Second)
+	}
+
+	attachConcurrently(guards, 6)
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts after the grace period = %d, want exactly 1", got)
+	}
+}
+
+func TestOpenCodeServiceGuard_StallThatClearsNeverRestarts(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+	g := fake.guard(t.TempDir())
+
+	g.attach("opencode")
+	fake.advance(openCodeServiceStallGrace / 2)
+	fake.answer.Store(true)
+	if _, ok := g.attach("opencode"); !ok {
+		t.Fatal("service answers again but attach failed")
+	}
+	fake.answer.Store(false)
+	fake.advance(openCodeServiceStallGrace)
+	g.attach("opencode")
+	if got := fake.restarts.Load(); got != 0 {
+		t.Fatalf("restarts = %d, want 0 (two short stalls are not one long one)", got)
 	}
 }
 
