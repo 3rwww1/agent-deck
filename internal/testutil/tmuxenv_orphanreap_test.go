@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -31,6 +32,7 @@ func TestOrphanReapChild(t *testing.T) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("spawn: %v: %s", err, out)
 		}
+		os.Stdout.WriteString("PID=" + strconv.Itoa(tmuxPidOnSocket(t, socket)) + "\n")
 		os.Stdout.WriteString("SOCKET=" + socket + "\n")
 		time.Sleep(time.Hour)
 	case "isolate":
@@ -49,10 +51,11 @@ func TestIsolateTmuxSocket_ReapsServerOfDeadOwner(t *testing.T) {
 		{"SIGINT", syscall.SIGINT},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			socket := spawnOrphanedServer(t, tc.sig)
-			pid := tmuxPidOnSocket(t, socket)
-			if pid == 0 || !tmuxServerAnswers(socket) {
-				t.Fatalf("no orphaned server on %s after %s; the fixture is broken", socket, tc.name)
+			socket, pid := spawnOrphanedServer(t, tc.sig)
+			if !tmuxServerAnswers(socket) {
+				// A sibling package binary's IsolateTmuxSocket can legitimately reap
+				// the orphan first under `go test ./...`.
+				t.Skipf("orphan on %s already gone after %s, reaped by a concurrent run", socket, tc.name)
 			}
 
 			child := exec.Command(os.Args[0], "-test.run=^TestOrphanReapChild$")
@@ -73,8 +76,8 @@ func TestIsolateTmuxSocket_ReapsServerOfDeadOwner(t *testing.T) {
 }
 
 // spawnOrphanedServer runs a child that starts a server via ShortTmuxSocket,
-// kills the child with sig, and returns the server's socket.
-func spawnOrphanedServer(t *testing.T, sig syscall.Signal) string {
+// kills the child with sig, and returns the server's socket and pid.
+func spawnOrphanedServer(t *testing.T, sig syscall.Signal) (string, int) {
 	t.Helper()
 	child := exec.Command(os.Args[0], "-test.run=^TestOrphanReapChild$")
 	child.Env = append(envWithoutTmuxVars(), orphanChildEnv+"=spawn")
@@ -86,8 +89,12 @@ func spawnOrphanedServer(t *testing.T, sig syscall.Signal) string {
 		t.Fatal(err)
 	}
 	var socket string
+	pid := 0
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
+		if p, ok := strings.CutPrefix(scanner.Text(), "PID="); ok {
+			pid, _ = strconv.Atoi(p)
+		}
 		if s, ok := strings.CutPrefix(scanner.Text(), "SOCKET="); ok {
 			socket = s
 			break
@@ -95,16 +102,10 @@ func spawnOrphanedServer(t *testing.T, sig syscall.Signal) string {
 	}
 	_ = child.Process.Signal(sig)
 	_ = child.Wait()
-	if socket == "" {
-		t.Fatal("spawn child printed no socket")
+	if socket == "" || pid == 0 {
+		t.Fatalf("spawn child printed socket %q pid %d; the fixture is broken", socket, pid)
 	}
-	serverPID := tmuxPidOnSocket(t, socket)
 	t.Cleanup(func() {
-		if serverPID > 0 && processAlive(serverPID) {
-			if proc, err := os.FindProcess(serverPID); err == nil {
-				_ = proc.Kill()
-			}
-		}
 		cmd := exec.Command("tmux", "-S", socket, "kill-server")
 		cmd.Env = envWithoutTmuxVars()
 		_ = cmd.Run()
@@ -112,7 +113,7 @@ func spawnOrphanedServer(t *testing.T, sig syscall.Signal) string {
 			_ = os.RemoveAll(dir)
 		}
 	})
-	return socket
+	return socket, pid
 }
 
 func tmuxServerAnswers(socket string) bool {

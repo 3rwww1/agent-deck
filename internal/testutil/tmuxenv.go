@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Name of the marker env var set during test isolation. Runtime guards in
@@ -192,11 +194,32 @@ func isDefaultTmuxBase(dir string) bool {
 // test — but "best effort" here means every socket present gets a kill
 // attempt, not that the attempt is optional.
 func KillTmuxServersUnder(dir string) {
+	for _, socket := range tmuxSocketsUnder(dir) {
+		_ = runTmuxOnSocket(socket, "kill-server")
+	}
+}
+
+// tmuxSocketTimeout bounds every call against a socket, so a wedged server
+// left by a dead run cannot hang the TestMain that reaps it.
+const tmuxSocketTimeout = 5 * time.Second
+
+// runTmuxOnSocket runs one tmux command against an absolute socket path with a
+// TMUX*-free env and a timeout.
+func runTmuxOnSocket(socket string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxSocketTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux", append([]string{"-S", socket}, args...)...)
+	cmd.Env = envWithoutTmuxVars()
+	return cmd.Run()
+}
+
+// tmuxSocketsUnder lists the sockets under dir, or nothing when tmux is absent.
+func tmuxSocketsUnder(dir string) []string {
 	if dir == "" {
-		return
+		return nil
 	}
 	if _, err := exec.LookPath("tmux"); err != nil {
-		return
+		return nil
 	}
 	// tmux nests sockets one level down as <TMUX_TMPDIR>/tmux-<uid>/<name>;
 	// ShortTmuxSocket-style callers place theirs directly in dir.
@@ -204,6 +227,7 @@ func KillTmuxServersUnder(dir string) {
 		filepath.Join(dir, "*"),
 		filepath.Join(dir, "tmux-*", "*"),
 	}
+	var sockets []string
 	seen := make(map[string]bool)
 	for _, pattern := range patterns {
 		matches, err := filepath.Glob(pattern)
@@ -219,11 +243,10 @@ func KillTmuxServersUnder(dir string) {
 			if err != nil || info.Mode()&os.ModeSocket == 0 {
 				continue
 			}
-			cmd := exec.Command("tmux", "-S", socket, "kill-server")
-			cmd.Env = envWithoutTmuxVars()
-			_ = cmd.Run()
+			sockets = append(sockets, socket)
 		}
 	}
+	return sockets
 }
 
 // envWithoutTmuxVars returns the process environment with every TMUX*
@@ -331,10 +354,27 @@ func reapDeadOwnerTmuxDirs() {
 					continue
 				}
 				KillTmuxServersUnder(dir)
+				if tmuxServerSurvivesUnder(dir) {
+					continue
+				}
 				_ = os.RemoveAll(dir)
 			}
 		}
 	}
+}
+
+// tmuxServerSurvivesUnder reports whether any socket under dir still answers or
+// times out. Such a dir is kept: removing it would strand the server for good,
+// and the next run retries the kill.
+func tmuxServerSurvivesUnder(dir string) bool {
+	for _, socket := range tmuxSocketsUnder(dir) {
+		err := runTmuxOnSocket(socket, "list-sessions")
+		var exitErr *exec.ExitError
+		if err == nil || !errors.As(err, &exitErr) || !exitErr.Exited() {
+			return true
+		}
+	}
+	return false
 }
 
 // ownPlainDir reports whether dir is a real directory, not a symlink, owned by
