@@ -153,4 +153,7 @@ func TestGetSessionContentWithLive_NeverReturnsPeerTranscript(t *testing.T) {
 	if content, _ := getSessionContentWithLive(lane, "", peers); strings.Contains(content, "PEER_") {
 		t.Fatalf("lane content is a peer's reply: %q", content)
 	}
+	if content, _ := getSessionContentWithLive(lane, "", peers[:2]); !strings.Contains(content, "PEER_B_REPLY") {
+		t.Fatalf("lane content = %q; want the transcript no peer is bound to, as the lane's rollover", content)
+	}
 }

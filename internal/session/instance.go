@@ -9299,6 +9299,7 @@ func (i *Instance) getClaudeLastResponse() (*ResponseOutput, error) {
 	return parseClaudeLastAssistantMessage(data, filepath.Base(sessionFile))
 }
 
+// claudeSessionsOwnedByPeers lists, lowercased, the Claude transcripts other sessions are bound to.
 func claudeSessionsOwnedByPeers(inst *Instance, peers []*Instance) map[string]bool {
 	owned := map[string]bool{}
 	for _, p := range peers {
@@ -13787,26 +13788,30 @@ func UpdateClaudeSessionsWithDedup(instances []*Instance) {
 	ordered := make([]*Instance, len(instances))
 	copy(ordered, instances)
 
+	recorded := make(map[*Instance]bool, len(ordered))
+	for _, inst := range ordered {
+		recorded[inst] = inst.recordedClaudeSessionID() != ""
+	}
 	// Recorded claims first, then older sessions, get priority for keeping IDs.
 	sort.SliceStable(ordered, func(i, j int) bool {
-		if ri, rj := ordered[i].recordedClaudeSessionID() != "", ordered[j].recordedClaudeSessionID() != ""; ri != rj {
+		if ri, rj := recorded[ordered[i]], recorded[ordered[j]]; ri != rj {
 			return ri
 		}
 		return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
 	})
 
-	// Find and clear duplicate IDs (keep only the oldest session's claim)
+	// Find and clear duplicate IDs (keep only the first claim in that order)
 	idOwner := make(map[string]*Instance)
 	for _, inst := range ordered {
 		if !IsClaudeCompatible(inst.Tool) || inst.ClaudeSessionID == "" {
 			continue
 		}
 		if owner, exists := idOwner[inst.ClaudeSessionID]; exists {
-			// Duplicate found! The older session (owner) keeps the ID
-			// Clear the newer session's ID (it will get a new one from tmux env)
+			// Duplicate found! The owner, earlier in that order, keeps the ID
+			// Clear this session's ID (it will get a new one from tmux env)
 			inst.ClaudeSessionID = ""
 			inst.ClaudeDetectedAt = time.Time{}
-			_ = owner // Older session keeps its ID
+			_ = owner // Owner keeps its ID
 		} else {
 			idOwner[inst.ClaudeSessionID] = inst
 		}
