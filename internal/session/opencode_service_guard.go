@@ -49,7 +49,7 @@ type openCodeServiceGuard struct {
 	lockDir    func() (string, error)
 	status     func(binary string) (openCodeService, error)
 	run        func(binary, action string) error // "start" or "restart"
-	healthy    func(svc openCodeService) bool
+	probe      func(svc openCodeService) error
 	registered func() (openCodeService, error)
 }
 
@@ -61,7 +61,7 @@ func newOpenCodeServiceGuard() *openCodeServiceGuard {
 		lockDir:    resolveLocksDirForSpawnLock,
 		status:     openCodeServiceStatus,
 		run:        runOpenCodeServiceAction,
-		healthy:    openCodeServiceHealthy,
+		probe:      probeOpenCodeService,
 		registered: openCodeRegisteredService,
 	}
 }
@@ -96,8 +96,10 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 
 	svc, err := g.status(binary)
 	g.disabled = errors.Is(err, errOpenCodeServiceDisabled)
-	if err == nil && g.healthy(svc) {
-		return g.markHealthy(svc), true
+	if err == nil {
+		if err = g.probe(svc); err == nil {
+			return g.markHealthy(svc), true
+		}
 	}
 
 	var action string
@@ -107,8 +109,9 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 	case errors.Is(err, errOpenCodeServiceDisabled):
 		g.retryAt = g.now().Add(openCodeServiceHealthTTL)
 		return openCodeService{}, false
-	case err != nil:
-		sessionLog.Debug("opencode_service_status_failed", slog.String("error", err.Error()))
+	case !errors.Is(err, errOpenCodeServiceSilent):
+		// Only silence is a stall: a service that rejects the probe (a 401, a 503 while it boots) is up.
+		sessionLog.Debug("opencode_service_check_failed", slog.String("error", err.Error()))
 		return openCodeService{}, false
 	default:
 		// A stall usually clears by itself; failures further apart than the gap are separate outages.
@@ -134,7 +137,7 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 			slog.String("action", action), slog.String("error", err.Error()))
 		return openCodeService{}, false
 	}
-	if svc, err := g.status(binary); err == nil && g.healthy(svc) {
+	if svc, err := g.status(binary); err == nil && g.probe(svc) == nil {
 		return g.markHealthy(svc), true
 	}
 	return openCodeService{}, false
@@ -214,23 +217,31 @@ func runOpenCodeServiceAction(binary, action string) error {
 	return cmd.Run()
 }
 
-// openCodeServiceHealthy makes the same probe an attached TUI makes before it starts.
-func openCodeServiceHealthy(svc openCodeService) bool {
+var errOpenCodeServiceSilent = errors.New("opencode background service did not answer its health probe")
+
+// probeOpenCodeService makes the same probe an attached TUI makes before it starts.
+func probeOpenCodeService(svc openCodeService) error {
 	ctx, cancel := context.WithTimeout(context.Background(), openCodeServiceHealthTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, svc.URL+"/api/info", nil)
 	if err != nil {
-		return false
+		return err
 	}
 	if svc.Password != "" {
 		req.SetBasicAuth("opencode", svc.Password)
 	}
 	resp, err := openCodeSessionHTTPClient.Do(req)
 	if err != nil {
-		return false
+		if ctx.Err() != nil {
+			return errOpenCodeServiceSilent
+		}
+		return err
 	}
 	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("opencode service health probe: HTTP %s", resp.Status)
+	}
+	return nil
 }
 
 // attachOpenCodeToSharedService leaves the password to the pane's shell, out of the stored command.
