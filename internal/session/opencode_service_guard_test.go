@@ -382,6 +382,30 @@ esac
 	}
 }
 
+// A disabled setting that cannot be read fails closed: the service the user may have turned off is never started.
+func TestOpenCodeServiceGuard_UnreadableDisabledSettingNeverStarts(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "opencode")
+	script := "#!/bin/sh\ncase \"$*\" in\n'service status') echo stopped ;;\n'service get disabled') echo 'config unreadable' >&2; exit 1 ;;\nesac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registerOpenCodeService(t, "", 0, "")
+	g := newOpenCodeServiceGuard()
+	g.lockDir = func() (string, error) { return t.TempDir(), nil }
+	var actions []string
+	g.run = func(_, action string) error {
+		actions = append(actions, action)
+		return nil
+	}
+
+	if _, ok := g.attach(bin); ok {
+		t.Fatal("attached a lane with no service running")
+	}
+	if len(actions) > 0 {
+		t.Fatalf("ran %v with the disabled setting unreadable, want nothing", actions)
+	}
+}
+
 // useFreshOpenCodeServiceGuard swaps in a new process-wide guard for the test.
 func useFreshOpenCodeServiceGuard(t *testing.T) *openCodeServiceGuard {
 	t.Helper()
