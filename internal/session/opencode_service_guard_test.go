@@ -1,12 +1,14 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -230,26 +232,27 @@ func TestBuildOpenCodeCommand_V2WaitsForSilentRegisteredService(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	for _, tc := range []struct {
-		name     string
-		pid      int
-		disabled bool
-		wantWait bool
+		name         string
+		pid          int
+		disabled     bool
+		answersAfter int // `service status` calls in the pane before it prints the URL; 0 is never
+		wantWait     bool
 	}{
-		{name: "registered and alive", pid: os.Getpid(), wantWait: true},
+		{name: "registered, answers again", pid: os.Getpid(), answersAfter: 2, wantWait: true},
+		{name: "registered, never answers", pid: os.Getpid(), wantWait: true},
 		{name: "not registered", pid: 0},
 		{name: "disabled", pid: os.Getpid(), disabled: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			// `service status` reports the service stopped until its second call, like a stall that clears.
 			useOpenCodeStub(t, fmt.Sprintf(`#!/bin/sh
 case "$*" in
-'service status') echo x >> %[1]s/status; [ "$(wc -l < %[1]s/status)" -ge 2 ] && echo %[2]s || echo stopped ;;
+'service status') echo x >> %[1]s/status; [ %[4]d -gt 0 ] && [ "$(wc -l < %[1]s/status)" -ge %[4]d ] && echo %[2]s || echo stopped ;;
 'service get disabled') echo %[3]t ;;
 'service get password') echo secret ;;
 *) echo "$OPENCODE_PASSWORD $*" > %[1]s/launched ;;
 esac
-`, dir, srv.URL, tc.disabled))
+`, dir, srv.URL, tc.disabled, tc.answersAfter))
 			registerOpenCodeService(t, srv.URL, tc.pid, "secret")
 			useFreshOpenCodeServiceGuard(t)
 
@@ -263,15 +266,36 @@ esac
 			if !strings.Contains(cmd, " --server "+srv.URL+" -s ses_BOUND") {
 				t.Fatalf("launch does not attach to the silent registered service: %q", cmd)
 			}
+
+			// sleep returns at once and records its interval, so the whole wait runs in milliseconds.
+			shims := t.TempDir()
+			if err := os.WriteFile(filepath.Join(shims, "sleep"), []byte("#!/bin/sh\necho \"$1\" >> "+dir+"/slept\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
 			_ = os.Remove(filepath.Join(dir, "status"))
-			pane := exec.Command("/bin/sh", "-c", cmd)
-			pane.Env = append(os.Environ(), "PATH="+os.Getenv("PATH")+":/usr/bin:/bin")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			pane := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+			pane.Env = append(os.Environ(), "PATH="+shims+":"+os.Getenv("PATH")+":/usr/bin:/bin")
 			if out, err := pane.CombinedOutput(); err != nil {
-				t.Fatalf("launch command failed: %v\n%s", err, out)
+				t.Fatalf("launch command did not finish: %v\n%s", err, out)
+			}
+
+			slept, _ := os.ReadFile(filepath.Join(dir, "slept"))
+			total := 0
+			for _, field := range strings.Fields(string(slept)) {
+				seconds, err := strconv.Atoi(field)
+				if err != nil || seconds < 5 {
+					t.Fatalf("wait polls every %q s, want 5 s or more: each poll is one opencode process", field)
+				}
+				total += seconds
+			}
+			if tc.answersAfter == 0 && time.Duration(total)*time.Second < openCodeServiceStallGrace {
+				t.Fatalf("wait gave up after %d s, before agent-deck restarts a stalled service (%s)", total, openCodeServiceStallGrace)
 			}
 			launched, _ := os.ReadFile(filepath.Join(dir, "launched"))
 			if got, want := strings.TrimSpace(string(launched)), "secret --server "+srv.URL+" -s ses_BOUND"; got != want {
-				t.Fatalf("pane launched %q, want %q once the service answers", got, want)
+				t.Fatalf("pane launched %q, want %q after the wait", got, want)
 			}
 		})
 	}

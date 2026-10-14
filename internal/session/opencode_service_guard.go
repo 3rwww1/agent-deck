@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -26,6 +27,9 @@ const (
 	openCodeServiceHealthTimeout = 2 * time.Second
 	openCodeServiceActionTimeout = 30 * time.Second
 	openCodeServiceLockName      = "opencode-service.lock"
+	// Each poll of a waiting lane is one opencode process; the limit leaves room for one stall restart.
+	openCodeServiceWaitPoll  = 5 * time.Second
+	openCodeServiceWaitLimit = openCodeServiceStallGrace + time.Minute
 )
 
 type openCodeServiceGuard struct {
@@ -222,8 +226,9 @@ func (i *Instance) attachOpenCodeToSharedService(cmd string) string {
 		attached = `OPENCODE_PASSWORD="$(` + cmd + ` service get password)" ` + attached
 	}
 	if wait {
-		// `service status` prints the URL only once the service answers again.
-		attached = "until " + cmd + " service status 2>/dev/null | grep -q '^http'; do sleep 2; done && " + attached
+		// `service status` prints the URL once the service answers; past the limit OpenCode reports it unreachable.
+		attached = fmt.Sprintf(`waited=0 && until %s service status 2>/dev/null | grep -q '^http' || [ "$waited" -ge %d ]; do waited=$((waited+1)); sleep %d; done && `,
+			cmd, openCodeServiceWaitLimit/openCodeServiceWaitPoll, int(openCodeServiceWaitPoll/time.Second)) + attached
 	}
 	return attached
 }
