@@ -13,9 +13,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"al.essio.dev/pkg/shellescape"
 )
 
-// One guard per process: lanes share one health probe per TTL, and a stall gets a grace before a restart.
+// Each owning 2.x TUI restarts a stalled service, so lanes attach and only agent-deck recovers it.
 
 const (
 	openCodeServiceHealthTTL     = 30 * time.Second
@@ -52,7 +54,7 @@ func newOpenCodeServiceGuard() *openCodeServiceGuard {
 	}
 }
 
-// attach is false while the service is unreachable, so no lane is pointed at a dead URL.
+// attach is false while the service is unreachable, so the lane launches the default way instead.
 func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -184,4 +186,21 @@ func openCodeServiceHealthy(svc openCodeService) bool {
 	}
 	_ = resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// attachOpenCodeToSharedService leaves the password to the pane's shell, out of the stored command.
+func (i *Instance) attachOpenCodeToSharedService(cmd string) string {
+	binary, ok := i.openCodeLaunchBinary()
+	if !ok {
+		return cmd
+	}
+	svc, ok := sharedOpenCodeService.attach(binary)
+	if !ok {
+		return cmd
+	}
+	attached := cmd + " --server " + shellescape.Quote(svc.URL)
+	if svc.Password == "" {
+		return attached
+	}
+	return `OPENCODE_PASSWORD="$(` + cmd + ` service get password)" ` + attached
 }

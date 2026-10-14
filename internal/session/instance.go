@@ -2180,6 +2180,7 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 		cmd := GetToolCommand("opencode")
 		var extraFlags string
 		if i.openCodeRejectsV1LaunchFlags() {
+			cmd = i.attachOpenCodeToSharedService(cmd)
 			// 2.x exits on -m/--agent/--port (opencode_version.go). Without
 			// --port there is no SSE server, so status falls back to tmux.
 			if dropped := i.buildOpenCodeExtraFlags(); dropped != "" {

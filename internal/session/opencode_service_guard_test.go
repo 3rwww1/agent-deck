@@ -191,6 +191,36 @@ func TestResolveOpenCodeService_ReconnectsReuseHealthyService(t *testing.T) {
 	}
 }
 
+// A 2.x launch attaches with --server and reads the password in the pane, never in the command.
+func TestBuildOpenCodeCommand_V2AttachesToSharedService(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	const password = "registration-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user, pass, ok := r.BasicAuth(); r.URL.Path != "/api/info" || !ok || user != "opencode" || pass != password {
+			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"version":"2.0.25"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	useOpenCodeStub(t, fmt.Sprintf("#!/bin/sh\n[ \"$1 $2\" = 'service status' ] && echo %s\n", srv.URL))
+	registerOpenCodeService(t, srv.URL, 1, password)
+	useFreshOpenCodeServiceGuard(t)
+
+	inst := &Instance{Tool: "opencode", OpenCodeSessionID: "ses_BOUND"}
+	cmd := inst.buildOpenCodeCommand("opencode")
+	if !strings.Contains(cmd, " --server "+srv.URL+" -s ses_BOUND") {
+		t.Fatalf("launch does not attach to the shared service: %q", cmd)
+	}
+	if !strings.Contains(cmd, `OPENCODE_PASSWORD="$(`) || !strings.Contains(cmd, ` service get password)" `) {
+		t.Fatalf("launch does not read the service password in the pane: %q", cmd)
+	}
+	if strings.Contains(cmd, password) {
+		t.Fatalf("launch command carries the service password: %q", cmd)
+	}
+}
+
 // useFreshOpenCodeServiceGuard swaps in a new process-wide guard for the test.
 func useFreshOpenCodeServiceGuard(t *testing.T) *openCodeServiceGuard {
 	t.Helper()
