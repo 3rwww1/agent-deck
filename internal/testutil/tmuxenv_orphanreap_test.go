@@ -71,6 +71,9 @@ func TestIsolateTmuxSocket_ReapsServerOfDeadOwner(t *testing.T) {
 			if processAlive(pid) {
 				t.Fatalf("tmux server pid %d on %s survived IsolateTmuxSocket after its owner died by %s", pid, socket, tc.name)
 			}
+			if _, err := os.Stat(filepath.Dir(socket)); !os.IsNotExist(err) {
+				t.Fatalf("reaped dir %s still exists (err=%v)", filepath.Dir(socket), err)
+			}
 		})
 	}
 }
@@ -104,8 +107,8 @@ func spawnOrphanedServer(t *testing.T, sig syscall.Signal) (string, int) {
 	}
 	_ = child.Process.Signal(sig)
 	_ = child.Wait()
-	if socket == "" || pid == 0 {
-		t.Fatalf("spawn child printed socket %q pid %d; the fixture is broken", socket, pid)
+	if socket == "" {
+		t.Fatal("spawn child printed no socket")
 	}
 	t.Cleanup(func() {
 		cmd := exec.Command("tmux", "-S", socket, "kill-server")
@@ -115,6 +118,9 @@ func spawnOrphanedServer(t *testing.T, sig syscall.Signal) (string, int) {
 			_ = os.RemoveAll(dir)
 		}
 	})
+	if pid == 0 {
+		t.Fatalf("spawn child printed no server pid for %s; the fixture is broken", socket)
+	}
 	return socket, pid
 }
 

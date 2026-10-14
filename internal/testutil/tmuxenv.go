@@ -374,13 +374,28 @@ func reapDeadOwnerTmuxDirs() {
 // client speaking the server's protocol version.
 func tmuxServerSurvivesUnder(dir string) bool {
 	for _, socket := range tmuxSocketsUnder(dir) {
-		conn, err := net.DialTimeout("unix", socket, reapTimeout)
-		if err == nil {
-			_ = conn.Close()
+		if socketListensAfter(socket, reapTimeout) {
 			return true
 		}
 	}
 	return false
+}
+
+// socketListensAfter polls a dial until the listener goes away or the deadline
+// passes: a server still accepts connections while kill-server shuts it down.
+func socketListensAfter(socket string, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		conn, err := net.DialTimeout("unix", socket, wait)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+		if time.Now().After(deadline) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // ownPlainDir reports whether dir is a real directory, not a symlink, owned by
