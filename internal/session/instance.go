@@ -977,6 +977,16 @@ func (inst *Instance) IsMultiRepo() bool {
 	return inst.MultiRepoEnabled
 }
 
+// syncTmuxWorkDir points the respawn fast paths at the current path: a
+// same-process `session move` edits ProjectPath after the tmux session loaded.
+func (inst *Instance) syncTmuxWorkDir() {
+	if inst.tmuxSession == nil {
+		return
+	}
+	inst.tmuxSession.WorkDir = inst.EffectiveWorkingDir()
+	inst.tmuxSession.WorkDirIsPlaceholder = inst.IsSSH()
+}
+
 // AllProjectPaths returns all project paths: [ProjectPath] + AdditionalPaths.
 func (inst *Instance) AllProjectPaths() []string {
 	paths := []string{inst.ProjectPath}

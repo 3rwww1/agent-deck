@@ -417,7 +417,7 @@ func TestStartSpawnsGoThroughNewSpawnCommand(t *testing.T) {
 	assert.Contains(t, body, "newSpawnCommand(")
 	assert.Contains(t, body, "verifyPaneWorkDirUnlessPlaceholder(",
 		"Start must verify where the pane actually landed before reporting success (#1713)")
-	assert.Contains(t, body, "resolveStartWorkDir(",
+	assert.Contains(t, body, "resolveSpawnWorkDir(",
 		"Start must validate the working directory before spawning (#1713)")
 }
 

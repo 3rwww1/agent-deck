@@ -567,6 +567,8 @@ func (i *Instance) restart(env map[string]string) (err error) {
 		i.ensureClaudeSessionIDFromDiskForRestart()
 	}
 
+	i.syncTmuxWorkDir()
+
 	// If Claude session with known ID AND tmux session exists, use respawn-pane.
 	if IsClaudeCompatible(i.Tool) && i.ClaudeSessionID != "" && i.tmuxSession != nil && i.tmuxSession.Exists() {
 		// A known-ID restart resumes straight to `claude --resume <uuid>`
