@@ -307,6 +307,33 @@ func TestQueryOpenCodeSession_V2UnboundNeverAdoptsDirectorySession(t *testing.T)
 	}
 }
 
+// The version probe can answer differently between two calls (a cold probe
+// times out, the next one is memoised), so only the first verdict may pick the path.
+func TestQueryOpenCodeSession_V2VerdictTakenOnce(t *testing.T) {
+	var probes atomic.Int32
+	prev := probeOpenCodeMajorVersion
+	probeOpenCodeMajorVersion = func(*Instance) (int, bool) {
+		if probes.Add(1) == 1 {
+			return 0, false
+		}
+		return 2, true
+	}
+	t.Cleanup(func() { probeOpenCodeMajorVersion = prev })
+
+	projectPath := t.TempDir()
+	startedAt := time.Now().UnixMilli()
+	page := fmt.Sprintf(`{"data":[`+
+		`{"id":"ses_SIBLING","parentID":null,"location":{"directory":%q},"time":{"created":%d,"updated":%d}}`+
+		`],"cursor":{"previous":null,"next":null}}`, projectPath, startedAt+1_000, startedAt+2_000)
+	setFakeOpenCodePath(t, fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = api ]; then printf '%%s\\n' %q; else echo '[]'; fi\n", page), false)
+	configureFakeOpenCode(t)
+
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: startedAt}
+	if got := inst.queryOpenCodeSession(); got != "" {
+		t.Fatalf("lane read as 1.x then listed the 2.x service and adopted %q", got)
+	}
+}
+
 func TestQueryOpenCodeSession_V2RunsConfiguredBinary(t *testing.T) {
 	pinOpenCodeMajorVersion(t, 2, true)
 	projectPath := t.TempDir()
