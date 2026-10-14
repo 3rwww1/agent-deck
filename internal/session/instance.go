@@ -8751,7 +8751,7 @@ func (i *Instance) GetLastResponseAtVersion(peers []*Instance, version string) (
 // 4. Fallback to terminal parsing.
 // 5. If still unavailable, return an empty response (no error).
 //
-// peers are the profile's instances: the disk scan never answers with a
+// peers are the profile's instances: the Claude disk scan never answers with a
 // transcript one of them is bound to.
 func (i *Instance) GetLastResponseBestEffort(peers ...*Instance) (*ResponseOutput, error) {
 	if IsCodexCompatible(i.Tool) {
@@ -9289,12 +9289,11 @@ func (i *Instance) getClaudeLastResponse() (*ResponseOutput, error) {
 	return parseClaudeLastAssistantMessage(data, filepath.Base(sessionFile))
 }
 
-// claudeSessionsOwnedByPeers lists the Claude sessions other instances are bound to.
 func claudeSessionsOwnedByPeers(inst *Instance, peers []*Instance) map[string]bool {
 	owned := map[string]bool{}
 	for _, p := range peers {
 		if p != nil && p.ID != inst.ID && p.ClaudeSessionID != "" {
-			owned[p.ClaudeSessionID] = true
+			owned[strings.ToLower(p.ClaudeSessionID)] = true
 		}
 	}
 	return owned
@@ -9381,9 +9380,8 @@ func (i *Instance) findLatestClaudeTranscriptOnDisk(peers ...*Instance) (string,
 		if !i.LastStartedAt.IsZero() && c.mod.Before(i.LastStartedAt) {
 			continue
 		}
-		// Another instance's bound transcript is its conversation, never this
-		// one's rollover, and it is the newest one until this lane replies.
-		if peerBound[c.id] {
+		// A peer's bound transcript is its conversation, never this one's rollover.
+		if peerBound[strings.ToLower(c.id)] {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(projectDir, c.id+".jsonl"))
@@ -13777,7 +13775,11 @@ func UpdateClaudeSessionsWithDedup(instances []*Instance) {
 	copy(ordered, instances)
 
 	// Sort instances by CreatedAt (older first get priority for keeping IDs).
+	// A disk-scanned claim never evicts the session that recorded the id.
 	sort.SliceStable(ordered, func(i, j int) bool {
+		if ri, rj := ordered[i].recordedClaudeSessionID() != "", ordered[j].recordedClaudeSessionID() != ""; ri != rj {
+			return ri
+		}
 		return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
 	})
 
