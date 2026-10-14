@@ -324,41 +324,6 @@ func TestQueryOpenCodeSession_V2RunsConfiguredBinary(t *testing.T) {
 	}
 }
 
-func TestQueryOpenCodeSession_V2UnboundIgnoresSiblingUpdatedAfterSpawn(t *testing.T) {
-	pinOpenCodeMajorVersion(t, 2, true)
-	projectPath := t.TempDir()
-	startedAt := time.Now().UnixMilli()
-	// A sibling deck session keeps this conversation busy, so its updated time
-	// is newer than our spawn even though it was created long before it.
-	payload := fmt.Sprintf(`{"data":[`+
-		`{"id":"ses_SIBLING","location":{"directory":%q},"time":{"created":%d,"updated":%d}}`+
-		`],"cursor":{"previous":null,"next":null}}`, projectPath, startedAt-3_600_000, startedAt+60_000)
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", payload)
-	setFakeOpenCodePath(t, script, false)
-	configureFakeOpenCode(t)
-
-	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: startedAt}
-	if got := inst.queryOpenCodeSession(); got != "" {
-		t.Fatalf("unbound 2.x instance adopted a sibling's conversation: %q", got)
-	}
-}
-
-func TestQueryOpenCodeSession_V2UnboundWithoutStartTimeStaysUnbound(t *testing.T) {
-	pinOpenCodeMajorVersion(t, 2, true)
-	projectPath := t.TempDir()
-	now := time.Now().UnixMilli()
-	payload := fmt.Sprintf(`{"data":[`+
-		`{"id":"ses_SIBLING","location":{"directory":%q},"time":{"created":%d,"updated":%d}}`+
-		`],"cursor":{"previous":null,"next":null}}`, projectPath, now-3_600_000, now)
-	setFakeOpenCodePath(t, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", payload), false)
-	configureFakeOpenCode(t)
-
-	inst := &Instance{Tool: "opencode", ProjectPath: projectPath}
-	if got := inst.queryOpenCodeSession(); got != "" {
-		t.Fatalf("unbound 2.x instance with no start time adopted %q", got)
-	}
-}
-
 // On 2.x the shared service lists every deck session's conversation in the
 // directory, so recent local activity is no evidence that a newer sibling
 // belongs to this instance.

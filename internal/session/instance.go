@@ -3127,26 +3127,14 @@ func (i *Instance) queryOpenCodeSession() string {
 	projectPath := i.ProjectPath
 	currentID := i.OpenCodeSessionID
 	startedAt := i.OpenCodeStartedAt
-	lastStartedAt := i.LastStartedAt
 	i.mu.RUnlock()
 
-	sharedService := port == 0 && i.openCodeRejectsV1LaunchFlags()
-	if sharedService {
+	if port == 0 && i.openCodeRejectsV1LaunchFlags() {
 		// Lanes in one directory share the service, so an unbound 2.x lane never guesses its session.
 		if currentID == "" {
 			return ""
 		}
 		return i.queryBoundOpenCodeServiceSession(projectPath, currentID)
-	}
-	var minCreated int64
-	if sharedService && currentID == "" {
-		// OpenCodeStartedAt is not persisted, so a reloaded instance falls back to its last start.
-		if startedAt <= 0 && !lastStartedAt.IsZero() {
-			startedAt = lastStartedAt.UnixMilli()
-		}
-		if startedAt > 0 {
-			minCreated = startedAt - opencodeStartupTimeSkew.Milliseconds()
-		}
 	}
 
 	var sessions []openCodeSessionMetadata
@@ -3162,7 +3150,7 @@ func (i *Instance) queryOpenCodeSession() string {
 			return ""
 		}
 	} else {
-		sessions = i.queryOpenCodeSessionsCLI(projectPath, currentID, minCreated)
+		sessions = i.queryOpenCodeSessionsCLI(projectPath, currentID, 0)
 	}
 
 	sessionLog.Debug("opencode_parsed_sessions", slog.Int("count", len(sessions)))
@@ -3175,7 +3163,7 @@ func (i *Instance) queryOpenCodeSession() string {
 		}
 	}
 
-	bestMatch := findBestOpenCodeSession(sessions, projectPath, currentID, startedAt, activityAt, sharedService)
+	bestMatch := findBestOpenCodeSession(sessions, projectPath, currentID, startedAt, activityAt, false)
 	sessionLog.Debug(
 		"opencode_best_match",
 		slog.String("session_id", bestMatch),
