@@ -376,7 +376,7 @@ func (h *Home) copyCodeBlock(block CodeBlock, sessionTitle string) tea.Cmd {
 // picker for the user to choose. It is the entry point for the #1412 `Y`
 // hotkey. sessionContent is injected so the core is testable without tmux.
 func (h *Home) startCodeBlockCopy(inst *session.Instance) tea.Cmd {
-	content, err := getSessionContent(inst)
+	content, err := getSessionContent(inst, h.snapshotInstances())
 	if err != nil {
 		h.setError(fmt.Errorf("no output to extract code from: %w", err))
 		return nil

@@ -1033,7 +1033,8 @@ func (i *Instance) retractClaudeCandidateLink(candidate string) {
 }
 
 // UpdateClaudeSessionsWithDedup clears duplicate Claude session IDs across instances.
-// The oldest session (by CreatedAt) keeps its ID, newer duplicates are cleared.
+// A recorded claim keeps its ID over a disk-scanned one, then the oldest session
+// (by CreatedAt) wins; the other duplicates are cleared.
 // With tmux env being authoritative, duplicates shouldn't occur in normal use,
 // but we handle them defensively for loaded/migrated sessions.
 func UpdateClaudeSessionsWithDedup(instances []*Instance) {
@@ -1041,23 +1042,30 @@ func UpdateClaudeSessionsWithDedup(instances []*Instance) {
 	ordered := make([]*Instance, len(instances))
 	copy(ordered, instances)
 
-	// Sort instances by CreatedAt (older first get priority for keeping IDs).
+	recorded := make(map[*Instance]bool, len(ordered))
+	for _, inst := range ordered {
+		recorded[inst] = inst.recordedClaudeSessionID() != ""
+	}
+	// Recorded claims first, then older sessions, get priority for keeping IDs.
 	sort.SliceStable(ordered, func(i, j int) bool {
+		if ri, rj := recorded[ordered[i]], recorded[ordered[j]]; ri != rj {
+			return ri
+		}
 		return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
 	})
 
-	// Find and clear duplicate IDs (keep only the oldest session's claim)
+	// Find and clear duplicate IDs (keep only the first claim in that order)
 	idOwner := make(map[string]*Instance)
 	for _, inst := range ordered {
 		if !IsClaudeCompatible(inst.Tool) || inst.ClaudeSessionID == "" {
 			continue
 		}
 		if owner, exists := idOwner[inst.ClaudeSessionID]; exists {
-			// Duplicate found! The older session (owner) keeps the ID
-			// Clear the newer session's ID (it will get a new one from tmux env)
+			// Duplicate found! The owner, earlier in that order, keeps the ID
+			// Clear this session's ID (it will get a new one from tmux env)
 			inst.ClaudeSessionID = ""
 			inst.ClaudeDetectedAt = time.Time{}
-			_ = owner // Older session keeps its ID
+			_ = owner // Owner keeps its ID
 		} else {
 			idOwner[inst.ClaudeSessionID] = inst
 		}
