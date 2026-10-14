@@ -260,12 +260,18 @@ func TestOpenCodeServiceGuard_SharesFailedVerdicts(t *testing.T) {
 	}
 }
 
-// An api call targets the healthy service, its password in the env only, and otherwise runs standalone.
+// A service call goes to the healthy service, and otherwise to a standalone `opencode api`, never a bare one.
 func TestRunOpenCodeServiceCall_TargetsSharedServiceOrStandalone(t *testing.T) {
 	const password = "registration-secret"
+	var removed atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, pass, ok := r.BasicAuth(); r.URL.Path != "/api/info" || !ok || pass != password {
+		if _, pass, ok := r.BasicAuth(); !ok || pass != password {
 			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodDelete && r.URL.Path == "/api/session/ses_X" {
+			removed.Add(1)
+			fmt.Fprint(w, "true")
 			return
 		}
 		fmt.Fprint(w, `{"version":"2.0.25"}`)
@@ -289,9 +295,11 @@ func TestRunOpenCodeServiceCall_TargetsSharedServiceOrStandalone(t *testing.T) {
 			t.Fatalf("session.remove (service answering: %v): %v", answering, err)
 		}
 	}
+	if got := removed.Load(); got != 1 {
+		t.Fatalf("service saw %d DELETE requests, want 1 while it answered", got)
+	}
 	logged, _ := os.ReadFile(calls)
-	want := "api session.remove --param sessionID=ses_X --server " + srv.URL + " pw=" + password + "\n" +
-		"api session.remove --param sessionID=ses_X --standalone pw=\n"
+	want := "api session.remove --param sessionID=ses_X --standalone pw=\n"
 	if string(logged) != want {
 		t.Fatalf("opencode api calls =\n%s\nwant\n%s", logged, want)
 	}

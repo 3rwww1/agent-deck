@@ -3343,13 +3343,11 @@ func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPa
 	cursor := ""
 	usableSeen := false
 	for page := 0; page < openCodeServiceSessionMaxPages; page++ {
-		args := []string{"session.list",
-			"--param", "directory=" + projectPath,
-			"--param", "limit=" + strconv.Itoa(openCodeServiceSessionPageSize)}
+		query := url.Values{"directory": {projectPath}, "limit": {strconv.Itoa(openCodeServiceSessionPageSize)}}
 		if cursor != "" {
-			args = append(args, "--param", "cursor="+cursor)
+			query.Set("cursor", cursor)
 		}
-		output, ok := i.runOpenCodeCLI(ctx, projectPath, openCodeAPICommand(ctx, binary, args...))
+		output, ok := i.listOpenCodeServiceSessions(ctx, binary, projectPath, query)
 		if !ok {
 			return nil
 		}
@@ -11901,13 +11899,19 @@ func openCodeModelRef(model string) (map[string]string, error) {
 	return map[string]string{"providerID": providerID, "id": modelID}, nil
 }
 
-// runOpenCodeServiceCall runs one `opencode api <operation>` request with the
-// resolved opencode binary against the 2.x shared service for sessionID and
-// returns its stdout. An empty body sends no request body.
+// runOpenCodeServiceCall sends one 2.x `opencode api <operation>` request for
+// sessionID, straight to the healthy shared service when the guard holds one,
+// and returns the response body. An empty body sends no request body.
 func runOpenCodeServiceCall(binary, workDir, operation, sessionID, body string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	if route, ok := openCodeServiceRoutes[operation]; ok {
+		path := fmt.Sprintf(route.path, url.PathEscape(sessionID))
+		if output, served, err := callOpenCodeService(ctx, binary, route.method, path, body); served {
+			return output, err
+		}
+	}
 	// #nosec G204 -- binary is the configured opencode resolved by
 	// openCodeLaunchBinary, operation is a constant at every call site,
 	// sessionID passed a shell-safe identifier check, and the JSON body is
