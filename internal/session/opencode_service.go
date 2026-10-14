@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/procowner"
 )
@@ -56,9 +57,15 @@ func (i *Instance) resolveOpenCodeService() (openCodeService, error) {
 	return openCodeServiceStatus(binary)
 }
 
+// openCodeServiceCommandTimeout outlasts the 2 s health probe behind `service status`, plus CLI startup.
+var openCodeServiceCommandTimeout = 5 * time.Second
+
+// isOpenCodeServiceProcess rejects a stale registration whose pid now runs something else.
+var isOpenCodeServiceProcess = procowner.IsOpenCodeSharedServicePID
+
 // openCodeServiceStatus trusts the registration file's password only for the URL the binary reports.
 func openCodeServiceStatus(binary string) (openCodeService, error) {
-	out, err := runModelProbeCommand(binary, "service", "status")
+	out, err := runProbeCommandWithin(openCodeServiceCommandTimeout, binary, "service", "status")
 	if err != nil {
 		return openCodeService{}, err
 	}
@@ -93,9 +100,9 @@ var (
 	errOpenCodeServiceDisabled = errors.New("opencode background service is disabled")
 )
 
-// openCodeStoppedServiceStatus splits "stopped" into disabled, stalled (registered, alive) and stopped.
+// openCodeStoppedServiceStatus splits "stopped" into disabled, stalled (registered, still the service) and stopped.
 func openCodeStoppedServiceStatus(binary string) (openCodeService, error) {
-	out, err := runModelProbeCommand(binary, "service", "get", "disabled")
+	out, err := runProbeCommandWithin(openCodeServiceCommandTimeout, binary, "service", "get", "disabled")
 	if err != nil {
 		// Unknown is not stopped: starting a service the user turned off is the worse mistake.
 		return openCodeService{}, err
@@ -104,7 +111,7 @@ func openCodeStoppedServiceStatus(binary string) (openCodeService, error) {
 		return openCodeService{}, errOpenCodeServiceDisabled
 	}
 	reg, ok := readOpenCodeServiceRegistration()
-	if !ok || !procowner.Alive(reg.PID) {
+	if !ok || !isOpenCodeServiceProcess(reg.PID) {
 		return openCodeService{}, errOpenCodeServiceStopped
 	}
 	serviceURL, err := parseOpenCodeServiceURL(reg.URL)
