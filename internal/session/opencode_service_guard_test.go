@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -218,6 +219,61 @@ func TestBuildOpenCodeCommand_V2AttachesToSharedService(t *testing.T) {
 	}
 	if strings.Contains(cmd, password) {
 		t.Fatalf("launch command carries the service password: %q", cmd)
+	}
+}
+
+// A lane launched bare runs OpenCode's own service check, which kills a silent service, so it waits instead.
+func TestBuildOpenCodeCommand_V2WaitsForSilentRegisteredService(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "frozen", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct {
+		name     string
+		pid      int
+		disabled bool
+		wantWait bool
+	}{
+		{name: "registered and alive", pid: os.Getpid(), wantWait: true},
+		{name: "not registered", pid: 0},
+		{name: "disabled", pid: os.Getpid(), disabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// `service status` reports the service stopped until its second call, like a stall that clears.
+			useOpenCodeStub(t, fmt.Sprintf(`#!/bin/sh
+case "$*" in
+'service status') echo x >> %[1]s/status; [ "$(wc -l < %[1]s/status)" -ge 2 ] && echo %[2]s || echo stopped ;;
+'service get disabled') echo %[3]t ;;
+'service get password') echo secret ;;
+*) echo "$OPENCODE_PASSWORD $*" > %[1]s/launched ;;
+esac
+`, dir, srv.URL, tc.disabled))
+			registerOpenCodeService(t, srv.URL, tc.pid, "secret")
+			useFreshOpenCodeServiceGuard(t)
+
+			cmd := (&Instance{Tool: "opencode", OpenCodeSessionID: "ses_BOUND"}).buildOpenCodeCommand("opencode")
+			if !tc.wantWait {
+				if strings.Contains(cmd, " --server ") {
+					t.Fatalf("launch attaches with no live registered service: %q", cmd)
+				}
+				return
+			}
+			if !strings.Contains(cmd, " --server "+srv.URL+" -s ses_BOUND") {
+				t.Fatalf("launch does not attach to the silent registered service: %q", cmd)
+			}
+			_ = os.Remove(filepath.Join(dir, "status"))
+			pane := exec.Command("/bin/sh", "-c", cmd)
+			pane.Env = append(os.Environ(), "PATH="+os.Getenv("PATH")+":/usr/bin:/bin")
+			if out, err := pane.CombinedOutput(); err != nil {
+				t.Fatalf("launch command failed: %v\n%s", err, out)
+			}
+			launched, _ := os.ReadFile(filepath.Join(dir, "launched"))
+			if got, want := strings.TrimSpace(string(launched)), "secret --server "+srv.URL+" -s ses_BOUND"; got != want {
+				t.Fatalf("pane launched %q, want %q once the service answers", got, want)
+			}
+		})
 	}
 }
 

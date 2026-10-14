@@ -34,27 +34,30 @@ type openCodeServiceGuard struct {
 	healthyAt      time.Time
 	unhealthySince time.Time
 	lastFailedAt   time.Time
+	disabled       bool
 
-	now     func() time.Time
-	lockDir func() (string, error)
-	status  func(binary string) (openCodeService, error)
-	run     func(binary, action string) error // "start" or "restart"
-	healthy func(svc openCodeService) bool
+	now        func() time.Time
+	lockDir    func() (string, error)
+	status     func(binary string) (openCodeService, error)
+	run        func(binary, action string) error // "start" or "restart"
+	healthy    func(svc openCodeService) bool
+	registered func() (openCodeService, error)
 }
 
 var sharedOpenCodeService = newOpenCodeServiceGuard()
 
 func newOpenCodeServiceGuard() *openCodeServiceGuard {
 	return &openCodeServiceGuard{
-		now:     time.Now,
-		lockDir: resolveLocksDirForSpawnLock,
-		status:  openCodeServiceStatus,
-		run:     runOpenCodeServiceAction,
-		healthy: openCodeServiceHealthy,
+		now:        time.Now,
+		lockDir:    resolveLocksDirForSpawnLock,
+		status:     openCodeServiceStatus,
+		run:        runOpenCodeServiceAction,
+		healthy:    openCodeServiceHealthy,
+		registered: openCodeRegisteredService,
 	}
 }
 
-// attach is false while the service is unreachable, so the lane launches the default way instead.
+// attach is false while the service is unreachable.
 func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -70,6 +73,7 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 	defer lock.release()
 
 	svc, err := g.status(binary)
+	g.disabled = errors.Is(err, errOpenCodeServiceDisabled)
 	if err == nil && g.healthy(svc) {
 		return g.markHealthy(svc), true
 	}
@@ -109,6 +113,21 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 		return g.markHealthy(svc), true
 	}
 	return openCodeService{}, false
+}
+
+// launchTarget also hands out a registered service that stopped answering, to wait on: a bare lane's own check would kill it.
+func (g *openCodeServiceGuard) launchTarget(binary string) (svc openCodeService, wait, ok bool) {
+	if svc, ok := g.attach(binary); ok {
+		return svc, false, true
+	}
+	g.mu.Lock()
+	disabled := g.disabled
+	g.mu.Unlock()
+	if disabled {
+		return openCodeService{}, false, false
+	}
+	svc, err := g.registered()
+	return svc, err == nil, err == nil
 }
 
 func (g *openCodeServiceGuard) markHealthy(svc openCodeService) openCodeService {
@@ -194,13 +213,17 @@ func (i *Instance) attachOpenCodeToSharedService(cmd string) string {
 	if !ok {
 		return cmd
 	}
-	svc, ok := sharedOpenCodeService.attach(binary)
+	svc, wait, ok := sharedOpenCodeService.launchTarget(binary)
 	if !ok {
 		return cmd
 	}
 	attached := cmd + " --server " + shellescape.Quote(svc.URL)
-	if svc.Password == "" {
-		return attached
+	if svc.Password != "" {
+		attached = `OPENCODE_PASSWORD="$(` + cmd + ` service get password)" ` + attached
 	}
-	return `OPENCODE_PASSWORD="$(` + cmd + ` service get password)" ` + attached
+	if wait {
+		// `service status` prints the URL only once the service answers again.
+		attached = "until " + cmd + " service status 2>/dev/null | grep -q '^http'; do sleep 2; done && " + attached
+	}
+	return attached
 }
