@@ -1,11 +1,19 @@
 package testutil
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
+	"time"
+
+	"github.com/asheshgoplani/agent-deck/internal/procowner"
 )
 
 // Name of the marker env var set during test isolation. Runtime guards in
@@ -65,7 +73,9 @@ func IsolateTmuxSocket() func() {
 	_ = os.Unsetenv("TMUX")
 	_ = os.Unsetenv("TMUX_PANE")
 
-	dir, err := os.MkdirTemp(shortTmuxTmpBase(), "ad-tmux-")
+	reapDeadOwnerTmuxDirs()
+
+	dir, err := os.MkdirTemp(shortTmuxTmpBase(), ownedDirPattern("ad-tmux-"))
 	if err != nil {
 		// If we can't isolate via MkdirTemp, we still want tests to
 		// run — but we REALLY don't want them on the default socket.
@@ -187,11 +197,39 @@ func isDefaultTmuxBase(dir string) bool {
 // test — but "best effort" here means every socket present gets a kill
 // attempt, not that the attempt is optional.
 func KillTmuxServersUnder(dir string) {
-	if dir == "" {
-		return
-	}
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return
+	}
+	for _, socket := range tmuxSocketsUnder(dir) {
+		cmd := exec.Command("tmux", "-S", socket, "kill-server")
+		cmd.Env = envWithoutTmuxVars()
+		_ = cmd.Run()
+	}
+}
+
+// reapTimeout bounds each reaper call against a socket, so a wedged server
+// left by a dead run cannot hang the TestMain that reaps it.
+const reapTimeout = 5 * time.Second
+
+// killTmuxServersUnderBounded is KillTmuxServersUnder with reapTimeout per kill.
+func killTmuxServersUnderBounded(dir string) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return
+	}
+	for _, socket := range tmuxSocketsUnder(dir) {
+		ctx, cancel := context.WithTimeout(context.Background(), reapTimeout)
+		cmd := exec.CommandContext(ctx, "tmux", "-S", socket, "kill-server")
+		cmd.Env = envWithoutTmuxVars()
+		_ = cmd.Run()
+		cancel()
+	}
+}
+
+// tmuxSocketsUnder lists the sockets under dir without following symlinks, so a
+// planted link cannot steer a kill at a server outside dir.
+func tmuxSocketsUnder(dir string) []string {
+	if dir == "" {
+		return nil
 	}
 	// tmux nests sockets one level down as <TMUX_TMPDIR>/tmux-<uid>/<name>;
 	// ShortTmuxSocket-style callers place theirs directly in dir.
@@ -199,6 +237,7 @@ func KillTmuxServersUnder(dir string) {
 		filepath.Join(dir, "*"),
 		filepath.Join(dir, "tmux-*", "*"),
 	}
+	var sockets []string
 	seen := make(map[string]bool)
 	for _, pattern := range patterns {
 		matches, err := filepath.Glob(pattern)
@@ -210,15 +249,19 @@ func KillTmuxServersUnder(dir string) {
 				continue
 			}
 			seen[socket] = true
-			info, err := os.Stat(socket)
+			info, err := os.Lstat(socket)
 			if err != nil || info.Mode()&os.ModeSocket == 0 {
 				continue
 			}
-			cmd := exec.Command("tmux", "-S", socket, "kill-server")
-			cmd.Env = envWithoutTmuxVars()
-			_ = cmd.Run()
+			if parent := filepath.Dir(socket); parent != filepath.Clean(dir) {
+				if pinfo, err := os.Lstat(parent); err != nil || !pinfo.IsDir() {
+					continue
+				}
+			}
+			sockets = append(sockets, socket)
 		}
 	}
+	return sockets
 }
 
 // envWithoutTmuxVars returns the process environment with every TMUX*
@@ -245,7 +288,7 @@ func envWithoutTmuxVars() []string {
 //	socket, cleanup := testutil.ShortTmuxSocket()
 //	t.Cleanup(cleanup)
 func ShortTmuxSocket() (socket string, cleanup func()) {
-	dir, err := os.MkdirTemp(shortTmuxTmpBase(), "ad-sock-")
+	dir, err := os.MkdirTemp(shortTmuxTmpBase(), ownedDirPattern("ad-sock-"))
 	if err != nil {
 		// Primary MkdirTemp failed. Retry directly under /tmp so each call
 		// still gets a UNIQUE dir (MkdirTemp's random suffix) that fits
@@ -265,12 +308,124 @@ func ShortTmuxSocket() (socket string, cleanup func()) {
 	}
 }
 
+// ownedDirPrefixes are the isolated-dir prefixes whose names carry the owning
+// test binary's PID, so a later run can tell an orphan from a live sibling.
+var ownedDirPrefixes = []string{"ad-sock-", "ad-tmux-"}
+
+// ownedDirPattern returns the MkdirTemp pattern <prefix><pid>-*, so the owner
+// PID is in the name from the atomic create onward.
+func ownedDirPattern(prefix string) string {
+	return fmt.Sprintf("%s%d-*", prefix, os.Getpid())
+}
+
+// ownerPIDFromDirName parses the owner PID from a <prefix><pid>-<rand> name.
+// It returns 0 for any other shape. Legacy names (<prefix><rand>) MUST NOT
+// parse: the random suffix is not a live PID, so kill -0 would fail and a
+// still-running old-format test binary would have its servers reaped.
+func ownerPIDFromDirName(name, prefix string) int {
+	rest, ok := strings.CutPrefix(name, prefix)
+	if !ok {
+		return 0
+	}
+	pidField, randField, ok := strings.Cut(rest, "-")
+	if !ok {
+		return 0
+	}
+	if _, err := strconv.ParseUint(randField, 10, 64); err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(pidField)
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+// reapDeadOwnerTmuxDirs kills the servers in, then removes, every isolated dir
+// whose owning test binary is dead.
+//
+// t.Cleanup and TestMain defers never run on SIGKILL, on the `go test -timeout`
+// panic, or on default SIGINT/SIGTERM handling, and a `new-session -d` server
+// daemonizes past its test binary. This sweep is the only cleanup that does not
+// depend on how the owner died: the next run on the host reaps it. Dirs with a
+// live owner (a sibling package binary under `go test ./...`) and dirs with no
+// parseable owner are left alone, and nothing is ever reaped by age.
+func reapDeadOwnerTmuxDirs() {
+	bases := []string{os.TempDir()}
+	if short := shortTmuxTmpBase(); short != "" {
+		bases = append(bases, short)
+	}
+	seen := make(map[string]bool)
+	for _, base := range bases {
+		for _, prefix := range ownedDirPrefixes {
+			matches, _ := filepath.Glob(filepath.Join(base, prefix+"*"))
+			for _, dir := range matches {
+				if seen[dir] {
+					continue
+				}
+				seen[dir] = true
+				pid := ownerPIDFromDirName(filepath.Base(dir), prefix)
+				if pid == 0 || procowner.Alive(pid) || !ownPlainDir(dir) {
+					continue
+				}
+				killTmuxServersUnderBounded(dir)
+				if tmuxServerSurvivesUnder(dir) {
+					continue
+				}
+				_ = os.RemoveAll(dir)
+			}
+		}
+	}
+}
+
+// tmuxServerSurvivesUnder reports whether any socket under dir still has a
+// listener. Such a dir is kept: removing it would strand the server for good,
+// and the next run retries the kill. A raw dial does not depend on the tmux
+// client speaking the server's protocol version.
+func tmuxServerSurvivesUnder(dir string) bool {
+	for _, socket := range tmuxSocketsUnder(dir) {
+		if socketListensAfter(socket, reapTimeout) {
+			return true
+		}
+	}
+	return false
+}
+
+// socketListensAfter polls every 500ms, at most 10 dials per call, so repeated
+// reaps cannot fill a wedged server's listen backlog. Only a refused or missing
+// socket proves the server gone; any other dial result keeps the dir.
+func socketListensAfter(socket string, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		conn, err := net.DialTimeout("unix", socket, time.Second)
+		if err != nil {
+			return !errors.Is(err, syscall.ECONNREFUSED) && !errors.Is(err, syscall.ENOENT)
+		}
+		_ = conn.Close()
+		if time.Now().After(deadline) {
+			return true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// ownPlainDir reports whether dir is a real directory, not a symlink, owned by
+// this uid, so a planted entry cannot steer kill-server at a foreign server.
+func ownPlainDir(dir string) bool {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Getuid()
+}
+
 // shortTmuxTmpBase returns a short base directory for the per-test TMUX_TMPDIR.
 //
 // UNIX-domain socket paths are capped at sockaddr_un.sun_path (104 chars on
 // darwin, 108 on linux). tmux appends "/tmux-<uid>/<sock>" (~17 chars) to
-// TMUX_TMPDIR, and MkdirTemp's random suffix eats ~10 more, so the base must
-// stay well under ~75 chars. On darwin, os.TempDir() returns
+// TMUX_TMPDIR, and the owner PID plus MkdirTemp's random suffix eat ~18 more,
+// so the base must stay well under ~70 chars. On darwin, os.TempDir() returns
 // /var/folders/<aa>/<32-char-hash>/T (resolved through /private/...) which is
 // ~56 chars and immediately overshoots the limit. /tmp is the well-known short
 // path on every Unix-like OS, matches tmux's own default location, and matches
