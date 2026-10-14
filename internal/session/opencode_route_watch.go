@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,8 +28,9 @@ type openCodeRouteWatch struct {
 	mu    sync.Mutex
 	lanes map[string]openCodeRouteLane // by instance id
 
-	pane   func(inst *Instance) (tmux.PaneInfo, bool)
-	reopen func(inst *Instance) error
+	pane    func(inst *Instance) (tmux.PaneInfo, bool)
+	watched func(inst *Instance) bool
+	reopen  func(inst *Instance) error
 }
 
 type openCodeRouteLane struct {
@@ -41,13 +43,14 @@ var sharedOpenCodeRouteWatch = newOpenCodeRouteWatch()
 
 func newOpenCodeRouteWatch() *openCodeRouteWatch {
 	return &openCodeRouteWatch{
-		lanes:  map[string]openCodeRouteLane{},
-		pane:   freshOpenCodePaneInfo,
-		reopen: (*Instance).Restart,
+		lanes:   map[string]openCodeRouteLane{},
+		pane:    freshOpenCodePaneInfo,
+		watched: openCodePaneWatched,
+		reopen:  (*Instance).Restart,
 	}
 }
 
-// ReopenLostOpenCodeRoutes restarts each bound 2.x lane whose TUI left its session when the shared service restarted.
+// ReopenLostOpenCodeRoutes restarts each bound 2.x lane nobody is looking at whose TUI left its session after a shared service restart or outage.
 func ReopenLostOpenCodeRoutes(instances []*Instance) {
 	sharedOpenCodeRouteWatch.sweep(instances)
 }
@@ -72,6 +75,11 @@ func (w *openCodeRouteWatch) sweep(instances []*Instance) {
 		}
 		// Home with no service change or outage since the lane showed its session is the user's own navigation.
 		if pid == 0 || (lane.servicePID == pid && lane.outages == outages) {
+			continue
+		}
+		// A person on the pane may be typing, and a restart would drop the text: what they do next is theirs.
+		if w.watched(inst) {
+			w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid, outages: outages}
 			continue
 		}
 		if !lane.homeSeen {
@@ -113,6 +121,15 @@ func freshOpenCodePaneInfo(inst *Instance) (tmux.PaneInfo, bool) {
 	started := inst.lastStartTime
 	inst.mu.RUnlock()
 	return info, ok && !info.Dead && !at.Before(started)
+}
+
+// openCodePaneWatched counts agent-deck's own preview pipes too, and an unreadable answer counts as watched.
+func openCodePaneWatched(inst *Instance) bool {
+	if inst.tmuxSession == nil {
+		return true
+	}
+	out, err := tmux.OutputBounded(inst.TmuxSocketName, "display-message", "-p", "-t", inst.tmuxSession.Name, "#{session_attached}")
+	return err != nil || strings.TrimSpace(string(out)) != "0"
 }
 
 func (i *Instance) boundOpenCodeSessionTitled() bool {

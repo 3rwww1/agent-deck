@@ -11,7 +11,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
-// A TUI that lost its session on a reconnect sits on its home screen: the lane is reopened once per disruption.
+// A TUI that lost its session on a reconnect sits on its home screen: the lane is reopened once per disruption, unless someone is looking at it.
 func TestOpenCodeRouteWatch_ReopensLaneThatLostItsSessionOnReconnect(t *testing.T) {
 	pinOpenCodeMajorVersion(t, 2, true)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,14 +46,16 @@ func TestOpenCodeRouteWatch_ReopensLaneThatLostItsSessionOnReconnect(t *testing.
 	lane := func(id, sessionID string) *Instance {
 		return &Instance{ID: id, Tool: "opencode", OpenCodeSessionID: sessionID, lastStartTime: started}
 	}
-	titled, untitled, fresh := lane("titled", "ses_TITLED"), lane("untitled", "ses_UNTITLED"), lane("fresh", "ses_TITLED")
+	titled, untitled, fresh, watched := lane("titled", "ses_TITLED"), lane("untitled", "ses_UNTITLED"), lane("fresh", "ses_TITLED"), lane("watched", "ses_TITLED")
 	fresh.lastStartTime = time.Now()
-	lanes := []*Instance{titled, untitled, fresh}
+	lanes := []*Instance{titled, untitled, fresh, watched}
 
 	titles := map[string]string{}
 	reopened := map[string]int{}
 	w := newOpenCodeRouteWatch()
 	w.pane = func(inst *Instance) (tmux.PaneInfo, bool) { return tmux.PaneInfo{Title: titles[inst.ID]}, true }
+	attached := map[string]bool{"watched": true}
+	w.watched = func(inst *Instance) bool { return attached[inst.ID] }
 	w.reopen = func(inst *Instance) error { reopened[inst.ID]++; return nil }
 	show := func(title string) {
 		for _, inst := range lanes {
@@ -83,21 +85,58 @@ func TestOpenCodeRouteWatch_ReopensLaneThatLostItsSessionOnReconnect(t *testing.
 	show(openCodeHomeTitle)
 	sweep("home once after a service restart", nil)
 	sweep("home twice after a service restart", map[string]int{"titled": 1})
-	sweep("still home under the same service", map[string]int{"titled": 1})
+	attached["watched"] = false
+	sweep("still home under the same service, watcher gone", map[string]int{"titled": 1})
 
 	show("OC | Fix the login page")
 	sweep("back on their sessions after the reopen", map[string]int{"titled": 1})
 	guard.outages.Add(1)
 	show(openCodeHomeTitle)
 	sweep("home once after a failed check, same service", map[string]int{"titled": 1})
-	sweep("home twice after a failed check, same service", map[string]int{"titled": 2})
+	sweep("home twice after a failed check, same service", map[string]int{"titled": 2, "watched": 1})
 
 	if err := os.Remove(stateHome + "/opencode/service.json"); err != nil {
 		t.Fatal(err)
 	}
 	show("OC | Fix the login page")
-	sweep("service gone", map[string]int{"titled": 2})
+	sweep("service gone", map[string]int{"titled": 2, "watched": 1})
 	show(openCodeHomeTitle)
-	sweep("home with no service, once", map[string]int{"titled": 2})
-	sweep("home with no service, twice", map[string]int{"titled": 2})
+	sweep("home with no service, once", map[string]int{"titled": 2, "watched": 1})
+	sweep("home with no service, twice", map[string]int{"titled": 2, "watched": 1})
+}
+
+// Agent-deck's own preview pipe counts as a client: a lane just browsed in the TUI is being looked at.
+func TestOpenCodePaneWatched_CountsEveryAttachedClient(t *testing.T) {
+	skipIfNoTmuxBinary(t)
+	socket := fmt.Sprintf("adeck-route-watch-%d", os.Getpid())
+	t.Cleanup(func() { _ = tmux.Exec(socket, "kill-server").Run() })
+	if out, err := tmux.Exec(socket, "new-session", "-d", "-s", "lane", "sleep", "600").CombinedOutput(); err != nil {
+		t.Fatalf("new-session: %v: %s", err, out)
+	}
+	inst := &Instance{TmuxSocketName: socket, tmuxSession: &tmux.Session{Name: "lane", SocketName: socket}}
+	if openCodePaneWatched(inst) {
+		t.Fatal("lane with no client counted as watched")
+	}
+
+	client := tmux.Exec(socket, "-C", "attach-session", "-t", "lane")
+	stdin, err := client.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stdin.Close(); _ = client.Wait() })
+	deadline := time.Now().Add(5 * time.Second)
+	for !openCodePaneWatched(inst) {
+		if time.Now().After(deadline) {
+			t.Fatal("lane with a control client attached counted as unwatched")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	gone := &Instance{TmuxSocketName: socket + "-gone", tmuxSession: &tmux.Session{Name: "lane", SocketName: socket + "-gone"}}
+	if !openCodePaneWatched(gone) {
+		t.Fatal("lane whose clients cannot be read counted as unwatched")
+	}
 }
