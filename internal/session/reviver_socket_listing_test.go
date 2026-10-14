@@ -7,6 +7,10 @@ func TestReviverSweepListsEachSocketOnce(t *testing.T) {
 	sock := livenessSocket(t)
 	startLivenessSession(t, sock, "live-0")
 	rows := append(deadRows(sock, 300, StatusStopped), livenessRow("live-0", sock, StatusRunning))
+	// Classify probes the stored socket, which livenessRow leaves on the default server.
+	for _, row := range rows {
+		row.TmuxSocketName = sock
+	}
 
 	r := NewReviver()
 	r.PipeAlive = func(string) bool { return true }
