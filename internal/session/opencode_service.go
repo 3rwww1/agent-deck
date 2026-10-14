@@ -98,6 +98,11 @@ func openCodeStoppedServiceStatus(binary string) (openCodeService, error) {
 	if out, err := runModelProbeCommand(binary, "service", "get", "disabled"); err == nil && strings.TrimSpace(string(out)) == "true" {
 		return openCodeService{}, errOpenCodeServiceDisabled
 	}
+	return openCodeRegisteredService()
+}
+
+// openCodeRegisteredService is the service the registration file names, while its process lives.
+func openCodeRegisteredService() (openCodeService, error) {
 	reg, ok := readOpenCodeServiceRegistration()
 	if !ok || !procowner.Alive(reg.PID) {
 		return openCodeService{}, errOpenCodeServiceStopped
