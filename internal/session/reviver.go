@@ -108,7 +108,7 @@ const DefaultReviveConfirmAfter = 3 * time.Second
 // cold-start rate limits when many sessions are errored simultaneously.
 func NewReviver() *Reviver {
 	return &Reviver{
-		TmuxExists:   defaultTmuxExists,
+		TmuxExists:   newSweepTmuxExists(),
 		PipeAlive:    defaultPipeAlive,
 		PipeWanted:   defaultPipeWanted,
 		ReviveAction: defaultReviveAction,
@@ -390,6 +390,21 @@ func instanceTmuxName(inst *Instance) string {
 // doesn't exist).
 func defaultTmuxExists(name, socketName string) bool {
 	return tmux.HasSessionOnSocket(socketName, name)
+}
+
+// newSweepTmuxExists answers from one list-sessions per socket, taken on first
+// use and kept for the Reviver's life: one sweep, since every caller builds a
+// Reviver per sweep. A socket whose listing fails is probed per row instead.
+func newSweepTmuxExists() func(name, socketName string) bool {
+	pass := &StatusUpdatePass{}
+	return func(name, socketName string) bool {
+		names, ok := pass.listSessionNames(socketName)
+		if !ok {
+			return defaultTmuxExists(name, socketName)
+		}
+		_, exists := names[name]
+		return exists
+	}
 }
 
 // defaultPipeAlive consults the global PipeManager. Returns false if the
