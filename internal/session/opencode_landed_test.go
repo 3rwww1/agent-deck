@@ -26,7 +26,7 @@ func serveOpenCodeMessages(t *testing.T, pages map[string]string) *[]string {
 	useOpenCodeStub(t, "#!/bin/sh\nexit 0\n")
 	g := useFreshOpenCodeServiceGuard(t)
 	g.status = func(string) (openCodeService, error) { return openCodeService{URL: srv.URL, Password: "secret"}, nil }
-	g.healthy = func(openCodeService) bool { return true }
+	g.probe = func(openCodeService) error { return nil }
 	return &queries
 }
 
