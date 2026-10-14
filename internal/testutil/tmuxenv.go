@@ -196,6 +196,9 @@ func isDefaultTmuxBase(dir string) bool {
 // test — but "best effort" here means every socket present gets a kill
 // attempt, not that the attempt is optional.
 func KillTmuxServersUnder(dir string) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return
+	}
 	for _, socket := range tmuxSocketsUnder(dir) {
 		cmd := exec.Command("tmux", "-S", socket, "kill-server")
 		cmd.Env = envWithoutTmuxVars()
@@ -209,6 +212,9 @@ const reapTimeout = 5 * time.Second
 
 // killTmuxServersUnderBounded is KillTmuxServersUnder with reapTimeout per kill.
 func killTmuxServersUnderBounded(dir string) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return
+	}
 	for _, socket := range tmuxSocketsUnder(dir) {
 		ctx, cancel := context.WithTimeout(context.Background(), reapTimeout)
 		cmd := exec.CommandContext(ctx, "tmux", "-S", socket, "kill-server")
@@ -218,12 +224,10 @@ func killTmuxServersUnderBounded(dir string) {
 	}
 }
 
-// tmuxSocketsUnder lists the sockets under dir, or nothing when tmux is absent.
+// tmuxSocketsUnder lists the sockets under dir without following symlinks, so a
+// planted link cannot steer a kill at a server outside dir.
 func tmuxSocketsUnder(dir string) []string {
 	if dir == "" {
-		return nil
-	}
-	if _, err := exec.LookPath("tmux"); err != nil {
 		return nil
 	}
 	// tmux nests sockets one level down as <TMUX_TMPDIR>/tmux-<uid>/<name>;
@@ -244,9 +248,14 @@ func tmuxSocketsUnder(dir string) []string {
 				continue
 			}
 			seen[socket] = true
-			info, err := os.Stat(socket)
+			info, err := os.Lstat(socket)
 			if err != nil || info.Mode()&os.ModeSocket == 0 {
 				continue
+			}
+			if parent := filepath.Dir(socket); parent != filepath.Clean(dir) {
+				if pinfo, err := os.Lstat(parent); err != nil || !pinfo.IsDir() {
+					continue
+				}
 			}
 			sockets = append(sockets, socket)
 		}

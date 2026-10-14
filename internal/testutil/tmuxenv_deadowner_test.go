@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,5 +89,25 @@ func TestReapDeadOwnerTmuxDirs_SkipsLiveOwner(t *testing.T) {
 
 	if tmuxPidOnSocket(t, socket) == 0 {
 		t.Fatalf("reaper killed the server of live owner pid %d on %s", os.Getpid(), socket)
+	}
+}
+
+func TestTmuxSocketsUnder_SkipsSymlinkedSubdir(t *testing.T) {
+	dir := t.TempDir()
+	target, err := os.MkdirTemp(shortTmuxTmpBase(), "ad-link-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(target) })
+	l, err := net.Listen("unix", filepath.Join(target, "default"))
+	if err != nil {
+		t.Skipf("cannot listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	if err := os.Symlink(target, filepath.Join(dir, "tmux-501")); err != nil {
+		t.Fatal(err)
+	}
+	if got := tmuxSocketsUnder(dir); len(got) != 0 {
+		t.Fatalf("tmuxSocketsUnder followed a symlinked subdir: %v", got)
 	}
 }
