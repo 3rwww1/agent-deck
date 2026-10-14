@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -390,20 +391,21 @@ func tmuxServerSurvivesUnder(dir string) bool {
 	return false
 }
 
-// socketListensAfter polls a dial until the listener goes away or the deadline
-// passes: a server still accepts connections while kill-server shuts it down.
+// socketListensAfter polls every 500ms, at most 10 dials per call, so repeated
+// reaps cannot fill a wedged server's listen backlog. Only a refused or missing
+// socket proves the server gone; any other dial result keeps the dir.
 func socketListensAfter(socket string, wait time.Duration) bool {
 	deadline := time.Now().Add(wait)
 	for {
-		conn, err := net.DialTimeout("unix", socket, wait)
+		conn, err := net.DialTimeout("unix", socket, time.Second)
 		if err != nil {
-			return false
+			return !errors.Is(err, syscall.ECONNREFUSED) && !errors.Is(err, syscall.ENOENT)
 		}
 		_ = conn.Close()
 		if time.Now().After(deadline) {
 			return true
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 

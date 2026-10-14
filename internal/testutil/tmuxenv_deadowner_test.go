@@ -107,7 +107,8 @@ func TestTmuxSocketsUnder_SkipsSymlinkedSubdir(t *testing.T) {
 
 func findDeadPID(t *testing.T) int {
 	t.Helper()
-	for pid := 4_000_000; pid > 3_000_000; pid-- {
+	start := 4_000_000 - os.Getpid()%500_000
+	for pid := start; pid > start-500_000; pid-- {
 		if !procowner.Alive(pid) {
 			return pid
 		}
@@ -117,7 +118,11 @@ func findDeadPID(t *testing.T) int {
 }
 
 func TestReapDeadOwnerTmuxDirs_KeepsDirWithListener(t *testing.T) {
-	dir := filepath.Join(shortTmuxTmpBase(), fmt.Sprintf("ad-sock-%d-1", findDeadPID(t)))
+	base := shortTmuxTmpBase()
+	if base == "" {
+		t.Skip("no short tmp base")
+	}
+	dir := filepath.Join(base, fmt.Sprintf("ad-sock-%d-1", findDeadPID(t)))
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
