@@ -148,6 +148,7 @@ func TestOpenCodeServiceGuard_HealthyServiceIsProbedOncePerTTL(t *testing.T) {
 	if _, ok := g.attach("opencode"); ok {
 		t.Fatal("attached a lane to a silent service")
 	}
+	fake.advance(openCodeServiceRetryGap)
 	fake.answer.Store(true)
 	for range 10 {
 		if _, ok := g.attach("opencode"); !ok {
@@ -218,6 +219,78 @@ func TestBuildOpenCodeCommand_V2AttachesToSharedService(t *testing.T) {
 	}
 	if strings.Contains(cmd, password) {
 		t.Fatalf("launch command carries the service password: %q", cmd)
+	}
+}
+
+// Lanes in one sweep share a failed verdict; a disabled service is not asked again within the TTL.
+func TestOpenCodeServiceGuard_SharesFailedVerdicts(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		reused time.Duration
+	}{
+		{name: "silent", reused: openCodeServiceRetryGap},
+		{name: "disabled", err: errOpenCodeServiceDisabled, reused: openCodeServiceHealthTTL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+			g := fake.guard(t.TempDir())
+			statuses := 0
+			g.status = func(string) (openCodeService, error) {
+				statuses++
+				return openCodeService{URL: "http://127.0.0.1:49374"}, tc.err
+			}
+			for range 5 {
+				g.attach("opencode")
+			}
+			fake.advance(tc.reused - time.Second)
+			g.attach("opencode")
+			if statuses != 1 {
+				t.Fatalf("status asked %d times within %s, want 1", statuses, tc.reused)
+			}
+			fake.advance(time.Second)
+			g.attach("opencode")
+			if statuses != 2 {
+				t.Fatalf("status asked %d times after %s, want 2", statuses, tc.reused)
+			}
+		})
+	}
+}
+
+// An api call targets the healthy service, its password in the env only, and otherwise runs standalone.
+func TestRunOpenCodeServiceCall_TargetsSharedServiceOrStandalone(t *testing.T) {
+	const password = "registration-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, pass, ok := r.BasicAuth(); r.URL.Path != "/api/info" || !ok || pass != password {
+			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"version":"2.0.25"}`)
+	}))
+	t.Cleanup(srv.Close)
+	calls := filepath.Join(t.TempDir(), "calls")
+	bin := filepath.Join(t.TempDir(), "opencode")
+	script := fmt.Sprintf("#!/bin/sh\n[ \"$1 $2\" = 'service status' ] && { echo %s; exit 0; }\necho \"$* pw=${OPENCODE_PASSWORD:-}\" >> %s\n", srv.URL, calls)
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCODE_PASSWORD", "")
+	registerOpenCodeService(t, srv.URL, os.Getpid(), password)
+
+	for _, answering := range []bool{true, false} {
+		if !answering {
+			srv.Close()
+		}
+		useFreshOpenCodeServiceGuard(t)
+		if _, err := runOpenCodeServiceCall(bin, t.TempDir(), "session.remove", "ses_X", ""); err != nil {
+			t.Fatalf("session.remove (service answering: %v): %v", answering, err)
+		}
+	}
+	logged, _ := os.ReadFile(calls)
+	want := "api session.remove --param sessionID=ses_X --server " + srv.URL + " pw=" + password + "\n" +
+		"api session.remove --param sessionID=ses_X --standalone pw=\n"
+	if string(logged) != want {
+		t.Fatalf("opencode api calls =\n%s\nwant\n%s", logged, want)
 	}
 }
 

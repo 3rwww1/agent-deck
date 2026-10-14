@@ -3274,7 +3274,7 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath, currentID string, minCrea
 		return i.runOpenCodeServiceSessionPages(ctx, projectPath, currentID, minCreated)
 	}
 
-	output, ok := i.runOpenCodeCLI(ctx, projectPath, "opencode", "session", "list", "--format", "json")
+	output, ok := i.runOpenCodeCLI(ctx, projectPath, exec.CommandContext(ctx, "opencode", "session", "list", "--format", "json"))
 	if !ok {
 		return nil
 	}
@@ -3290,8 +3290,7 @@ func (i *Instance) runOpenCodeSessionsCLI(projectPath, currentID string, minCrea
 	return sessions
 }
 
-func (i *Instance) runOpenCodeCLI(ctx context.Context, projectPath, binary string, args ...string) ([]byte, bool) {
-	cmd := exec.CommandContext(ctx, binary, args...)
+func (i *Instance) runOpenCodeCLI(ctx context.Context, projectPath string, cmd *exec.Cmd) ([]byte, bool) {
 	cmd.Dir = projectPath
 	cmd.WaitDelay = 500 * time.Millisecond
 
@@ -3329,13 +3328,13 @@ func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPa
 	cursor := ""
 	usableSeen := false
 	for page := 0; page < openCodeServiceSessionMaxPages; page++ {
-		args := []string{"api", "session.list",
+		args := []string{"session.list",
 			"--param", "directory=" + projectPath,
 			"--param", "limit=" + strconv.Itoa(openCodeServiceSessionPageSize)}
 		if cursor != "" {
 			args = append(args, "--param", "cursor="+cursor)
 		}
-		output, ok := i.runOpenCodeCLI(ctx, projectPath, binary, args...)
+		output, ok := i.runOpenCodeCLI(ctx, projectPath, openCodeAPICommand(ctx, binary, args...))
 		if !ok {
 			return nil
 		}
@@ -11876,11 +11875,11 @@ func runOpenCodeServiceCall(binary, workDir, operation, sessionID, body string) 
 	// openCodeLaunchBinary, operation is a constant at every call site,
 	// sessionID passed a shell-safe identifier check, and the JSON body is
 	// passed as a single argv element.
-	args := []string{"api", operation, "--param", "sessionID=" + sessionID}
+	args := []string{operation, "--param", "sessionID=" + sessionID}
 	if body != "" {
 		args = append(args, "-d", body)
 	}
-	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd := openCodeAPICommand(ctx, binary, args...)
 	cmd.Dir = workDir
 	cmd.WaitDelay = 500 * time.Millisecond
 	output, err := cmd.Output()

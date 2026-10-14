@@ -275,7 +275,7 @@ func TestQueryOpenCodeSession_V2QueriesSharedServiceAndSkipsChildren(t *testing.
 		t.Fatalf("read argv marker: %v", err)
 	}
 	want := "api\nsession.list\n--param\ndirectory=" + projectPath + "\n--param\nlimit=" +
-		strconv.Itoa(openCodeServiceSessionPageSize) + "\n"
+		strconv.Itoa(openCodeServiceSessionPageSize) + "\n--standalone\n"
 	if string(gotArgv) != want {
 		t.Fatalf("opencode argv =\n%s\nwant\n%s", gotArgv, want)
 	}

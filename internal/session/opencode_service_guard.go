@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"al.essio.dev/pkg/shellescape"
+
+	"github.com/asheshgoplani/agent-deck/internal/childenv"
 )
 
 // Each owning 2.x TUI restarts a stalled service, so lanes attach and only agent-deck recovers it.
@@ -23,6 +26,7 @@ const (
 	openCodeServiceHealthTTL     = 30 * time.Second
 	openCodeServiceStallGrace    = 2 * time.Minute
 	openCodeServiceFailureGap    = 45 * time.Second
+	openCodeServiceRetryGap      = 5 * time.Second
 	openCodeServiceHealthTimeout = 2 * time.Second
 	openCodeServiceActionTimeout = 30 * time.Second
 	openCodeServiceLockName      = "opencode-service.lock"
@@ -32,6 +36,7 @@ type openCodeServiceGuard struct {
 	mu             sync.Mutex
 	svc            openCodeService
 	healthyAt      time.Time
+	retryAt        time.Time
 	unhealthySince time.Time
 	lastFailedAt   time.Time
 
@@ -61,7 +66,20 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 	if !g.healthyAt.IsZero() && g.now().Sub(g.healthyAt) < openCodeServiceHealthTTL {
 		return g.svc, true
 	}
+	if g.now().Before(g.retryAt) {
+		return openCodeService{}, false
+	}
+	if svc, ok := g.check(binary); ok {
+		return svc, true
+	}
+	// Lanes in one status sweep share a failed verdict instead of each probing.
+	if retry := g.now().Add(openCodeServiceRetryGap); retry.After(g.retryAt) {
+		g.retryAt = retry
+	}
+	return openCodeService{}, false
+}
 
+func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 	lock, err := g.lock()
 	if err != nil {
 		sessionLog.Warn("opencode_service_lock_failed", slog.String("error", err.Error()))
@@ -78,6 +96,9 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 	switch {
 	case errors.Is(err, errOpenCodeServiceStopped):
 		action = "start"
+	case errors.Is(err, errOpenCodeServiceDisabled):
+		g.retryAt = g.now().Add(openCodeServiceHealthTTL)
+		return openCodeService{}, false
 	case err != nil:
 		sessionLog.Debug("opencode_service_status_failed", slog.String("error", err.Error()))
 		return openCodeService{}, false
@@ -114,6 +135,7 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 func (g *openCodeServiceGuard) markHealthy(svc openCodeService) openCodeService {
 	g.svc = svc
 	g.healthyAt = g.now()
+	g.retryAt = time.Time{}
 	g.unhealthySince = time.Time{}
 	g.lastFailedAt = time.Time{}
 	return svc
@@ -203,4 +225,19 @@ func (i *Instance) attachOpenCodeToSharedService(cmd string) string {
 		return attached
 	}
 	return `OPENCODE_PASSWORD="$(` + cmd + ` service get password)" ` + attached
+}
+
+// openCodeAPICommand never makes a bare api call: its service check kills a service it finds stalled.
+func openCodeAPICommand(ctx context.Context, binary string, args ...string) *exec.Cmd {
+	svc, ok := sharedOpenCodeService.attach(binary)
+	target := []string{"--standalone"}
+	if ok {
+		target = []string{"--server", svc.URL}
+	}
+	// #nosec G204 -- binary is the resolved opencode binary and agent-deck builds every argument; no shell.
+	cmd := exec.CommandContext(ctx, binary, slices.Concat([]string{"api"}, args, target)...)
+	if svc.Password != "" {
+		cmd.Env = append(childenv.ForLaunch(""), "OPENCODE_PASSWORD="+svc.Password)
+	}
+	return cmd
 }
