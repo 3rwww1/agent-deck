@@ -254,7 +254,7 @@ func pipeDeadOnly(inst *Instance, class RevivalClass) bool {
 
 // confirmPipeDead re-reads the pipe of every pipe-dead-only instance once,
 // ConfirmAfter later, and downgrades to ClassAlive those whose pipe is up
-// by then. A single wait covers the whole batch.
+// or no longer wanted by then. A single wait covers the whole batch.
 func (r *Reviver) confirmPipeDead(instances []*Instance, classes []RevivalClass) {
 	if r.ConfirmAfter <= 0 || r.PipeAlive == nil {
 		return
@@ -277,12 +277,11 @@ func (r *Reviver) confirmPipeDead(instances []*Instance, classes []RevivalClass)
 		inst := instances[i]
 		name := instanceTmuxName(inst)
 		event := "reviver_pipe_dead_transient"
-		switch {
-		case r.PipeAlive(name):
-		case !r.wantsPipe(name):
+		if !r.PipeAlive(name) {
+			if r.wantsPipe(name) {
+				continue
+			}
 			event = "reviver_pipe_unwanted"
-		default:
-			continue
 		}
 		classes[i] = ClassAlive
 		if r.Log != nil {
