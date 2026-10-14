@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ type stubOpenCodeService struct {
 	now      time.Time
 	stopped  bool
 	answer   atomic.Bool
+	rejects  atomic.Bool // answers the probe with an error instead of staying silent
 	probes   atomic.Int32
 	starts   atomic.Int32
 	restarts atomic.Int32
@@ -60,9 +62,15 @@ func (f *stubOpenCodeService) guard(lockDir string) *openCodeServiceGuard {
 		}
 		return nil
 	}
-	g.healthy = func(openCodeService) bool {
+	g.probe = func(openCodeService) error {
 		f.probes.Add(1)
-		return f.answer.Load()
+		switch {
+		case f.answer.Load():
+			return nil
+		case f.rejects.Load():
+			return errors.New("opencode service health probe: HTTP 401 Unauthorized")
+		}
+		return errOpenCodeServiceSilent
 	}
 	return g
 }
@@ -137,6 +145,50 @@ func TestOpenCodeServiceGuard_StallThatClearsNeverRestarts(t *testing.T) {
 	g.attach("opencode")
 	if got := fake.restarts.Load(); got != 0 {
 		t.Fatalf("restarts = %d, want 0 (two short stalls are not one long one)", got)
+	}
+}
+
+// A service that rejects the probe (a 401 from a password agent-deck cannot read, a 503 while it boots) is up, not stalled.
+func TestOpenCodeServiceGuard_RejectedProbeNeverRestarts(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+	fake.rejects.Store(true)
+	g := fake.guard(t.TempDir())
+
+	for elapsed := time.Duration(0); elapsed <= 2*openCodeServiceStallGrace; elapsed += 30 * time.Second {
+		if _, ok := g.attach("opencode"); ok {
+			t.Fatal("attached a lane to a service that rejects its probe")
+		}
+		fake.advance(30 * time.Second)
+	}
+	if got := fake.restarts.Load(); got != 0 {
+		t.Fatalf("restarted a service that answers %d times, want 0", got)
+	}
+}
+
+// Only a probe that gets no answer in time is silence; an error answer or a refused connection is not.
+func TestProbeOpenCodeService_TellsSilenceFromRejection(t *testing.T) {
+	release := make(chan struct{})
+	silent := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() { close(release); silent.Close() })
+	rejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusUnauthorized)
+	}))
+	t.Cleanup(rejecting.Close)
+	refused := httptest.NewServer(http.NotFoundHandler())
+	refused.Close()
+
+	if err := probeOpenCodeService(openCodeService{URL: silent.URL}); !errors.Is(err, errOpenCodeServiceSilent) {
+		t.Fatalf("silent service: probe = %v, want %v", err, errOpenCodeServiceSilent)
+	}
+	for name, url := range map[string]string{"401": rejecting.URL, "refused": refused.URL} {
+		if err := probeOpenCodeService(openCodeService{URL: url}); err == nil || errors.Is(err, errOpenCodeServiceSilent) {
+			t.Fatalf("%s: probe = %v, want an error that is not silence", name, err)
+		}
 	}
 }
 
