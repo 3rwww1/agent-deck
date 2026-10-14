@@ -4,11 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
-	"maps"
 	"net/http"
-	"net/url"
-	"slices"
 	"strings"
 )
 
@@ -55,21 +51,4 @@ func callOpenCodeService(ctx context.Context, binary, method, path, body string)
 		return nil, true, fmt.Errorf("HTTP %s", resp.Status)
 	}
 	return out, true, nil
-}
-
-// listOpenCodeServiceSessions is one `session.list` page, from the service itself while it answers.
-func (i *Instance) listOpenCodeServiceSessions(ctx context.Context, binary, projectPath string, query url.Values) ([]byte, bool) {
-	output, served, err := callOpenCodeService(ctx, binary, http.MethodGet, "/api/session?"+query.Encode(), "")
-	if !served {
-		args := []string{"session.list"}
-		for _, key := range slices.Sorted(maps.Keys(query)) {
-			args = append(args, "--param", key+"="+query.Get(key))
-		}
-		return i.runOpenCodeCLI(ctx, projectPath, openCodeAPICommand(ctx, binary, args...))
-	}
-	if err != nil {
-		sessionLog.Debug("opencode_query_failed", slog.String("error", err.Error()))
-		return nil, false
-	}
-	return output, true
 }

@@ -3343,11 +3343,13 @@ func (i *Instance) runOpenCodeServiceSessionPages(ctx context.Context, projectPa
 	cursor := ""
 	usableSeen := false
 	for page := 0; page < openCodeServiceSessionMaxPages; page++ {
-		query := url.Values{"directory": {projectPath}, "limit": {strconv.Itoa(openCodeServiceSessionPageSize)}}
+		args := []string{"session.list",
+			"--param", "directory=" + projectPath,
+			"--param", "limit=" + strconv.Itoa(openCodeServiceSessionPageSize)}
 		if cursor != "" {
-			query.Set("cursor", cursor)
+			args = append(args, "--param", "cursor="+cursor)
 		}
-		output, ok := i.listOpenCodeServiceSessions(ctx, binary, projectPath, query)
+		output, ok := i.runOpenCodeCLI(ctx, projectPath, openCodeAPICommand(ctx, binary, args...))
 		if !ok {
 			return nil
 		}

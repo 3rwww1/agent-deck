@@ -5,14 +5,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // Each `opencode api` call starts one OpenCode process, so with a healthy service agent-deck sends the request itself.
@@ -20,7 +17,6 @@ func TestOpenCodeServiceCalls_GoStraightToHealthyService(t *testing.T) {
 	pinOpenCodeMajorVersion(t, 2, true)
 	const password = "registration-secret"
 	projectPath := t.TempDir()
-	startedAt := time.Now().UnixMilli()
 	var mu sync.Mutex
 	var requests []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,9 +44,8 @@ func TestOpenCodeServiceCalls_GoStraightToHealthyService(t *testing.T) {
 		requests = append(requests, request)
 		mu.Unlock()
 		switch r.URL.Path {
-		case "/api/session":
-			fmt.Fprintf(w, `{"data":[{"id":"ses_MINE","parentID":null,"location":{"directory":%q},"time":{"created":%d,"updated":%d}}],"cursor":{"previous":null,"next":null}}`,
-				projectPath, startedAt+1_000, startedAt+2_000)
+		case "/api/session/ses_MINE":
+			fmt.Fprint(w, movedSessionPayload("ses_MINE", projectPath))
 		case "/api/session/ses_GONE":
 			http.NotFound(w, r)
 		default:
@@ -63,7 +58,7 @@ func TestOpenCodeServiceCalls_GoStraightToHealthyService(t *testing.T) {
 	registerOpenCodeService(t, srv.URL, os.Getpid(), password)
 	useFreshOpenCodeServiceGuard(t)
 
-	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeStartedAt: startedAt}
+	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeSessionID: "ses_MINE"}
 	binary, ok := inst.openCodeLaunchBinary()
 	if !ok {
 		t.Fatal("no opencode binary")
@@ -81,8 +76,7 @@ func TestOpenCodeServiceCalls_GoStraightToHealthyService(t *testing.T) {
 	if spawned, _ := os.ReadFile(spawns); len(spawned) > 0 {
 		t.Fatalf("spawned opencode for calls a healthy service could serve:\n%s", spawned)
 	}
-	list := "GET /api/session?" + url.Values{"directory": {projectPath}, "limit": {strconv.Itoa(openCodeServiceSessionPageSize)}}.Encode()
-	want := []string{"POST /api/session/ses_PARENT/fork {}", "GET /api/session/ses_GONE", list}
+	want := []string{"POST /api/session/ses_PARENT/fork {}", "GET /api/session/ses_GONE", "GET /api/session/ses_MINE"}
 	mu.Lock()
 	defer mu.Unlock()
 	if strings.Join(requests, "\n") != strings.Join(want, "\n") {
