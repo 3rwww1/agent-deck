@@ -1,11 +1,10 @@
 package session
 
 import (
-	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
-	"time"
 
 	"al.essio.dev/pkg/shellescape"
 
@@ -24,17 +23,21 @@ type openCodeServiceSessionGet struct {
 func (i *Instance) queryBoundOpenCodeServiceSession(projectPath, currentID string) string {
 	binary, ok := i.openCodeLaunchBinary()
 	if !ok {
+		logBoundOpenCodeLookupFailed(currentID, "no opencode binary")
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	output, ok := i.runOpenCodeCLI(ctx, projectPath, binary,
-		"api", "session.get", "--param", "sessionID="+currentID)
-	if !ok {
+	output, err := runOpenCodeServiceCall(binary, projectPath, "session.get", currentID, "")
+	if err != nil {
+		logBoundOpenCodeLookupFailed(currentID, err.Error())
 		return ""
 	}
 	var got openCodeServiceSessionGet
-	if err := json.Unmarshal(output, &got); err != nil || got.Data.ID != currentID {
+	if err := json.Unmarshal(output, &got); err != nil {
+		logBoundOpenCodeLookupFailed(currentID, err.Error())
+		return ""
+	}
+	if got.Data.ID != currentID {
+		logBoundOpenCodeLookupFailed(currentID, fmt.Sprintf("reply carries session %q", got.Data.ID))
 		return ""
 	}
 	directory := got.Data.flatten().Directory
@@ -113,4 +116,10 @@ func ReadOpenCodeSessionDirFromToolData(td json.RawMessage, sessionID string) st
 		return ""
 	}
 	return blob.Location.Directory
+}
+
+func logBoundOpenCodeLookupFailed(sessionID, cause string) {
+	sessionLog.Debug("opencode_bound_session_lookup_failed",
+		slog.String("session_id", sessionID),
+		slog.String("error", logging.SanitizeValue(cause)))
 }
