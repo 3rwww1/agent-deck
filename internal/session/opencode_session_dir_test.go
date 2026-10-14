@@ -57,15 +57,21 @@ func TestQueryOpenCodeSession_V2BoundLookupFailureKeepsBinding(t *testing.T) {
 	sibling := fmt.Sprintf(`{"data":[`+
 		`{"id":"ses_SIBLING","parentID":null,"location":{"directory":%q},"time":{"created":5000,"updated":6000}}`+
 		`],"cursor":{"previous":null,"next":null}}`, projectPath)
-	setFakeOpenCodePath(t, fmt.Sprintf("#!/bin/sh\ncase \"$*\" in *session.get*) echo 'session not found' >&2; exit 1;; esac\nprintf '%%s\\n' %q\n", sibling), false)
-	configureFakeOpenCode(t)
-
-	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeSessionID: "ses_GONE"}
-	if got := inst.queryOpenCodeSession(); got != "" {
-		t.Fatalf("session ID = %q, want empty (no rebind, no sibling adopted)", got)
-	}
-	inst.applyOpenCodeSessionCandidate("")
-	if inst.OpenCodeSessionID != "ses_GONE" {
-		t.Fatalf("binding changed to %q after a failed lookup", inst.OpenCodeSessionID)
+	// 2.0.25 answers an unknown id with exit 1, this JSON on stdout and the HTTP status on stderr.
+	notFound := "#!/bin/sh\ncase \"$*\" in *session.get*) echo '{\"_tag\":\"SessionNotFoundError\"}'; " +
+		"echo 'HTTP 404 Not Found' >&2; exit 1;; esac\nprintf '%s\\n' '" + sibling + "'\n"
+	for name, fake := range map[string]func(t *testing.T){
+		"session not found": func(t *testing.T) { setFakeOpenCodePath(t, notFound, false); configureFakeOpenCode(t) },
+		"reply for another": func(t *testing.T) {
+			setFakeOpenCodeSessionGet(t, sibling, movedSessionPayload("ses_OTHER", projectPath))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake(t)
+			inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeSessionID: "ses_GONE"}
+			if got := inst.queryOpenCodeSession(); got != "" {
+				t.Fatalf("session ID = %q, want empty (no rebind, no sibling adopted)", got)
+			}
+		})
 	}
 }
