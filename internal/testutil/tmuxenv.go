@@ -2,8 +2,8 @@ package testutil
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/asheshgoplani/agent-deck/internal/procowner"
 )
 
 // Name of the marker env var set during test isolation. Runtime guards in
@@ -195,22 +197,25 @@ func isDefaultTmuxBase(dir string) bool {
 // attempt, not that the attempt is optional.
 func KillTmuxServersUnder(dir string) {
 	for _, socket := range tmuxSocketsUnder(dir) {
-		_ = runTmuxOnSocket(socket, "kill-server")
+		cmd := exec.Command("tmux", "-S", socket, "kill-server")
+		cmd.Env = envWithoutTmuxVars()
+		_ = cmd.Run()
 	}
 }
 
-// tmuxSocketTimeout bounds every call against a socket, so a wedged server
+// reapTimeout bounds each reaper call against a socket, so a wedged server
 // left by a dead run cannot hang the TestMain that reaps it.
-const tmuxSocketTimeout = 5 * time.Second
+const reapTimeout = 5 * time.Second
 
-// runTmuxOnSocket runs one tmux command against an absolute socket path with a
-// TMUX*-free env and a timeout.
-func runTmuxOnSocket(socket string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxSocketTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "tmux", append([]string{"-S", socket}, args...)...)
-	cmd.Env = envWithoutTmuxVars()
-	return cmd.Run()
+// killTmuxServersUnderBounded is KillTmuxServersUnder with reapTimeout per kill.
+func killTmuxServersUnderBounded(dir string) {
+	for _, socket := range tmuxSocketsUnder(dir) {
+		ctx, cancel := context.WithTimeout(context.Background(), reapTimeout)
+		cmd := exec.CommandContext(ctx, "tmux", "-S", socket, "kill-server")
+		cmd.Env = envWithoutTmuxVars()
+		_ = cmd.Run()
+		cancel()
+	}
 }
 
 // tmuxSocketsUnder lists the sockets under dir, or nothing when tmux is absent.
@@ -350,10 +355,10 @@ func reapDeadOwnerTmuxDirs() {
 				}
 				seen[dir] = true
 				pid := ownerPIDFromDirName(filepath.Base(dir), prefix)
-				if pid == 0 || pidAlive(pid) || !ownPlainDir(dir) {
+				if pid == 0 || procowner.Alive(pid) || !ownPlainDir(dir) {
 					continue
 				}
-				KillTmuxServersUnder(dir)
+				killTmuxServersUnderBounded(dir)
 				if tmuxServerSurvivesUnder(dir) {
 					continue
 				}
@@ -363,14 +368,15 @@ func reapDeadOwnerTmuxDirs() {
 	}
 }
 
-// tmuxServerSurvivesUnder reports whether any socket under dir still answers or
-// times out. Such a dir is kept: removing it would strand the server for good,
-// and the next run retries the kill.
+// tmuxServerSurvivesUnder reports whether any socket under dir still has a
+// listener. Such a dir is kept: removing it would strand the server for good,
+// and the next run retries the kill. A raw dial does not depend on the tmux
+// client speaking the server's protocol version.
 func tmuxServerSurvivesUnder(dir string) bool {
 	for _, socket := range tmuxSocketsUnder(dir) {
-		err := runTmuxOnSocket(socket, "list-sessions")
-		var exitErr *exec.ExitError
-		if err == nil || !errors.As(err, &exitErr) || !exitErr.Exited() {
+		conn, err := net.DialTimeout("unix", socket, reapTimeout)
+		if err == nil {
+			_ = conn.Close()
 			return true
 		}
 	}
@@ -386,20 +392,6 @@ func ownPlainDir(dir string) bool {
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	return ok && int(st.Uid) == os.Getuid()
-}
-
-// pidAlive mirrors internal/statedb's pidAlive (kill -0), but counts EPERM as
-// alive: the process exists, it just belongs to someone else.
-func pidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // shortTmuxTmpBase returns a short base directory for the per-test TMUX_TMPDIR.

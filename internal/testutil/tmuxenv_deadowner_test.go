@@ -3,6 +3,7 @@ package testutil
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,7 +46,7 @@ func TestReapDeadOwnerTmuxDirs_SkipsSymlink(t *testing.T) {
 	}
 	deadPID := 0
 	for pid := 4_000_000; pid > 3_000_000; pid-- {
-		if !pidAlive(pid) {
+		if !processAlive(pid) {
 			deadPID = pid
 			break
 		}
@@ -63,5 +64,29 @@ func TestReapDeadOwnerTmuxDirs_SkipsSymlink(t *testing.T) {
 
 	if _, err := os.Lstat(link); err != nil {
 		t.Fatalf("reaper acted on symlink %s: %v", link, err)
+	}
+}
+
+func TestReapDeadOwnerTmuxDirs_SkipsLiveOwner(t *testing.T) {
+	requireTmuxBinary(t)
+	dir, err := os.MkdirTemp(shortTmuxTmpBase(), ownedDirPattern("ad-sock-"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		KillTmuxServersUnder(dir)
+		_ = os.RemoveAll(dir)
+	})
+	socket := filepath.Join(dir, "s")
+	spawn := exec.Command("tmux", "-S", socket, "new-session", "-d", "sleep 600")
+	spawn.Env = envWithoutTmuxVars()
+	if out, err := spawn.CombinedOutput(); err != nil {
+		t.Skipf("could not spawn probe tmux server: %v: %s", err, out)
+	}
+
+	reapDeadOwnerTmuxDirs()
+
+	if tmuxPidOnSocket(t, socket) == 0 {
+		t.Fatalf("reaper killed the server of live owner pid %d on %s", os.Getpid(), socket)
 	}
 }

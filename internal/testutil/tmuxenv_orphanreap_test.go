@@ -88,6 +88,8 @@ func spawnOrphanedServer(t *testing.T, sig syscall.Signal) (string, int) {
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
+	stall := time.AfterFunc(30*time.Second, func() { _ = child.Process.Kill() })
+	defer stall.Stop()
 	var socket string
 	pid := 0
 	scanner := bufio.NewScanner(stdout)
