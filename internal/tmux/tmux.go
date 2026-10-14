@@ -2601,33 +2601,10 @@ func (s *Session) Start(command string) error {
 	// session whose project directory (or worktree) was deleted starts "fine"
 	// and runs the agent against the user's home directory instead. Failing here
 	// keeps the session untouched and surfaces the real reason at the CLI.
-	workDir := s.WorkDir
-	if workDir == "" {
-		workDir = os.Getenv("HOME")
-	}
-	resolvedWorkDir, workDirErr := resolveStartWorkDir(workDir)
+	workDir, workDirErr := s.resolveSpawnWorkDir()
 	if workDirErr != nil {
-		if !s.WorkDirIsPlaceholder {
-			statusLog.Warn("tmux_start_refused_bad_workdir",
-				slog.String("session", logging.SanitizeValue(s.Name)),
-				slog.String("requested_workdir", logging.SanitizeValue(s.WorkDir)),
-				slog.String("error", workDirErr.Error()))
-			return workDirErr
-		}
-		// An SSH session's local path is a placeholder: the pane only runs an
-		// ssh client, so a missing local directory must not block the start.
-		// Keep tmux's historical $HOME landing, but say so instead of hiding it.
-		statusLog.Warn("tmux_start_placeholder_workdir_fallback",
-			slog.String("session", logging.SanitizeValue(s.Name)),
-			slog.String("requested_workdir", logging.SanitizeValue(workDir)),
-			slog.String("error", workDirErr.Error()))
-		home, homeErr := resolveStartWorkDir(os.Getenv("HOME"))
-		if homeErr != nil {
-			return workDirErr
-		}
-		resolvedWorkDir = home
+		return workDirErr
 	}
-	workDir = resolvedWorkDir
 
 	s.Command = command
 	s.invalidateCache()
@@ -3968,6 +3945,37 @@ func (s *Session) escalateAfterRespawn(oldPIDs []int, newPIDs []int, probeErr er
 	s.ensureProcessesDead(oldPIDs, newPIDs)
 }
 
+// resolveSpawnWorkDir validates s.WorkDir for a new pane process (#1713).
+func (s *Session) resolveSpawnWorkDir() (string, error) {
+	workDir := s.WorkDir
+	if workDir == "" {
+		workDir = os.Getenv("HOME")
+	}
+	resolvedWorkDir, workDirErr := resolveStartWorkDir(workDir)
+	if workDirErr != nil {
+		if !s.WorkDirIsPlaceholder {
+			statusLog.Warn("tmux_start_refused_bad_workdir",
+				slog.String("session", logging.SanitizeValue(s.Name)),
+				slog.String("requested_workdir", logging.SanitizeValue(s.WorkDir)),
+				slog.String("error", workDirErr.Error()))
+			return "", workDirErr
+		}
+		// An SSH session's local path is a placeholder: the pane only runs an
+		// ssh client, so a missing local directory must not block the start.
+		// Keep tmux's historical $HOME landing, but say so instead of hiding it.
+		statusLog.Warn("tmux_start_placeholder_workdir_fallback",
+			slog.String("session", logging.SanitizeValue(s.Name)),
+			slog.String("requested_workdir", logging.SanitizeValue(workDir)),
+			slog.String("error", workDirErr.Error()))
+		home, homeErr := resolveStartWorkDir(os.Getenv("HOME"))
+		if homeErr != nil {
+			return "", workDirErr
+		}
+		return home, nil
+	}
+	return resolvedWorkDir, nil
+}
+
 // RespawnPane kills the current process in the pane and starts a new command.
 // This is more reliable than sending Ctrl+C and waiting for shell prompt.
 // The -k flag kills the current process before respawning.
@@ -3979,6 +3987,11 @@ func (s *Session) escalateAfterRespawn(oldPIDs []int, newPIDs []int, probeErr er
 func (s *Session) RespawnPane(command string) error {
 	if !s.Exists() {
 		return fmt.Errorf("session does not exist: %s", s.Name)
+	}
+	// Without -c, tmux reuses the pane's original start dir and ignores a changed path.
+	workDir, workDirErr := s.resolveSpawnWorkDir()
+	if workDirErr != nil {
+		return workDirErr
 	}
 	s.invalidateCache()
 
@@ -4010,9 +4023,9 @@ func (s *Session) RespawnPane(command string) error {
 	// -t: Target pane (session:window.pane format, use session: for active pane)
 	// command: New command to run
 	target := s.Name + ":" // Append colon to target the active pane
-	args := []string{"respawn-pane", "-k", "-t", target}
+	args := []string{"respawn-pane", "-k", "-t", target, "-c", workDir}
 	if command != "" {
-		wrapped, wrapErr := wrapRespawnCommand(command)
+		wrapped, wrapErr := wrapRespawnCommand(cwdAssertCommand(workDir, command))
 		if wrapErr != nil {
 			return wrapErr
 		}
