@@ -262,7 +262,11 @@ func runModelProbe(prober modelProber, path string) (*ModelProbeResult, string, 
 }
 
 func runModelProbeCommand(path string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), modelProbeTimeout)
+	return runProbeCommandWithin(modelProbeTimeout, path, args...)
+}
+
+func runProbeCommandWithin(timeout time.Duration, path string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, args...)
 	var stdout bytes.Buffer
@@ -272,7 +276,7 @@ func runModelProbeCommand(path string, args ...string) ([]byte, error) {
 	if err := cmd.Run(); err != nil {
 		command := filepath.Base(path) + " " + strings.Join(args, " ")
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("%s: timed out after %s", command, modelProbeTimeout)
+			return nil, fmt.Errorf("%s: timed out after %s", command, timeout)
 		}
 		return nil, fmt.Errorf("%s: %w", command, err)
 	}
