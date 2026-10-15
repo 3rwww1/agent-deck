@@ -336,6 +336,12 @@ type Instance struct {
 	OpenCodePort       int       `json:"opencode_port,omitempty"` // Localhost port of OpenCode's event server (issue #1614); 0 = none
 	lastOpenCodeScanAt time.Time // Rate-limits OpenCode session-discovery scans
 
+	// OpenCodeSessionDir is where the 2.x session openCodeSessionDirID lives;
+	// it differs from ProjectPath once the session moved (session_move). Read
+	// it through openCodeSessionDir, which drops it after any rebind.
+	OpenCodeSessionDir   string `json:"opencode_session_dir,omitempty"`
+	openCodeSessionDirID string
+
 	// Codex CLI integration
 	CodexSessionID  string    `json:"codex_session_id,omitempty"`
 	CodexDetectedAt time.Time `json:"codex_detected_at,omitempty"`
@@ -2286,8 +2292,8 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 		// If we already have a session ID, use resume with -s flag.
 		// OPENCODE_SESSION_ID is propagated via host-side SetEnvironment after tmux start.
 		if i.OpenCodeSessionID != "" {
-			return envPrefix + fmt.Sprintf("%s -s %s%s",
-				cmd, i.OpenCodeSessionID, extraFlags)
+			return envPrefix + fmt.Sprintf("%s -s %s%s%s",
+				cmd, i.OpenCodeSessionID, extraFlags, i.openCodeResumeDirArg())
 		}
 
 		// Start OpenCode fresh - session ID will be captured async after startup
