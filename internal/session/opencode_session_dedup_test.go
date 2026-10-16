@@ -150,6 +150,10 @@ func TestOpenCodeDedup_RestartOfClearedLaneSparesSibling(t *testing.T) {
 		t.Fatalf("bind sibling pane: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
+	origDetect := startOpenCodeDetectionAfterRestart
+	startOpenCodeDetectionAfterRestart = func(*Instance) {}
+	t.Cleanup(func() { startOpenCodeDetectionAfterRestart = origDetect })
+
 	cleared := NewInstanceWithTool("dedup-lane", projectDir, "opencode")
 	cleared.ID = "dedup-lane-instance"
 	cleared.tmuxSession = tmux.ReconnectSessionLazy(lane, lane, projectDir, "opencode", "waiting")

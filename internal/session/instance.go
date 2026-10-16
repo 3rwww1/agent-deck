@@ -2863,6 +2863,9 @@ func codexRolloutExistsInHome(sessionID, codexHome string) bool {
 	return codexRolloutPathInHome(sessionID, codexHome) != ""
 }
 
+// Swapped by tests: the detection outlives a test and races its cleanup.
+var startOpenCodeDetectionAfterRestart = func(i *Instance) { go i.detectOpenCodeSessionAsync() }
+
 // detectOpenCodeSessionAsync detects the OpenCode session ID after startup
 // OpenCode generates session IDs internally (format: ses_XXXXX)
 // We query the managed OpenCode HTTP server (or the bounded compatibility CLI
@@ -10488,7 +10491,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 
 		// If no session ID, start async detection
 		if i.OpenCodeSessionID == "" {
-			go i.detectOpenCodeSessionAsync()
+			startOpenCodeDetectionAfterRestart(i)
 		}
 
 		sessionLog.Info("restart_opencode_respawn_succeeded")
