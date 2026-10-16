@@ -447,6 +447,7 @@ func (s *Storage) saveWithGroups(instances []*Instance, groupTree *GroupTree) ([
 	UpdateClaudeSessionsWithDedup(instances)
 	updates := make([]statedb.InstanceSnapshot, len(instances))
 	clearIntents := make([]bool, len(instances))
+	openCodeClears := make([]bool, len(instances))
 	for i, inst := range instances {
 		if inst == nil {
 			return nil, fmt.Errorf("nil instance")
@@ -457,6 +458,7 @@ func (s *Storage) saveWithGroups(instances []*Instance, groupTree *GroupTree) ([
 		}
 		updates[i].Desired = row
 		clearIntents[i] = inst.genericSessionIDCleared
+		openCodeClears[i] = inst.openCodeSessionIDCleared
 		if snapshot := inst.storageSnapshot; snapshot != nil && snapshot.dbPath == s.dbPath {
 			updates[i].Original = snapshot.original
 			updates[i].Stored = snapshot.stored
@@ -478,6 +480,10 @@ func (s *Storage) saveWithGroups(instances []*Instance, groupTree *GroupTree) ([
 			inst.genericSessionIDCleared = false
 			original.ToolData = WriteGenericSessionIDToToolData(original.ToolData, "", time.Time{}, false)
 			original.ToolData = WriteGenericSessionScopeToToolData(original.ToolData, "", "", "", false)
+		}
+		if openCodeClears[i] {
+			inst.openCodeSessionIDCleared = false
+			original.ToolData = writeOpenCodeSessionClearToToolData(original.ToolData, false)
 		}
 		s.rememberInstanceSnapshot(inst, original, result.Instances[i])
 	}
@@ -1161,6 +1167,9 @@ func instanceToRow(inst *Instance) (*statedb.InstanceRow, error) {
 	// value from a fresh CLI process instead of always-zero.
 	toolData = WriteLastStartedAtToToolData(toolData, inst.LastStartedAt)
 	toolData = WriteOpenCodeSessionDirToToolData(toolData, inst.OpenCodeSessionID, inst.openCodeSessionDir())
+	if inst.OpenCodeSessionID == "" {
+		toolData = writeOpenCodeSessionClearToToolData(toolData, inst.openCodeSessionIDCleared)
+	}
 	// Custom [tools.*] conversation id — reboot-safe resume when resume_flag set.
 	// intentionalClear makes sticky MergeToolDataExtras honor operator clears
 	// without breaking stale-empty full-table saves (see generic_session_persist.go).
