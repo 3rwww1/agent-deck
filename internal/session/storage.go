@@ -1559,6 +1559,8 @@ func (s *Storage) LoadWithGroupsSnapshot() ([]*Instance, []*GroupData, *statedb.
 			}
 			s.rememberInstanceSnapshot(inst, original, stored)
 		}
+		// After the snapshot, so a save writes the clear instead of merging it away.
+		UpdateOpenCodeSessionsWithDedup(instances)
 		groupsByPath := make(map[string]*statedb.GroupRow, len(dbGroups))
 		for _, row := range dbGroups {
 			groupsByPath[row.Path] = row

@@ -2237,12 +2237,46 @@ func KillSessionsWithEnvValue(envKey, envValue, excludeName string) {
 	}
 
 	socket := DefaultSocketName()
+	names, _ := sessionsWithEnvValue(socket, envKey, envValue, excludeName)
+	for _, name := range names {
+		statusLog.Warn("killing_duplicate_session",
+			slog.String("session", logging.SanitizeValue(name)),
+			slog.String("env_key", logging.SanitizeValue(envKey)),
+			slog.String("env_value", logging.SanitizeValue(envValue)),
+			slog.String("kept", logging.SanitizeValue(excludeName)))
+		// Bounded — see tmuxMutationTimeout. Best-effort already (error
+		// discarded), so a timeout changes nothing but the wait.
+		_ = runBoundedMutation(socket, "kill-session", "-t", name)
+	}
+}
+
+// OtherSessionWithEnvValue names a session KillSessionsWithEnvValue would
+// kill, or "" for none. An unreadable session list is an error, not a none.
+func OtherSessionWithEnvValue(envKey, envValue, excludeName string) (string, error) {
+	if envValue == "" {
+		return "", nil
+	}
+	names, err := sessionsWithEnvValue(DefaultSocketName(), envKey, envValue, excludeName)
+	if err != nil || len(names) == 0 {
+		return "", err
+	}
+	return names[0], nil
+}
+
+// sessionsWithEnvValue lists the agentdeck sessions other than excludeName
+// whose environment sets envKey to envValue.
+func sessionsWithEnvValue(socket, envKey, envValue, excludeName string) ([]string, error) {
 	// Bounded — see tmuxPollTimeout.
 	out, err := runBoundedOutput(socket, "list-sessions", "-F", "#{session_name}")
 	if err != nil {
-		return
+		// No server, or no tmux at all, holds no session; a timeout or a wedged server is unknown.
+		if isEmptyTmuxServerResult(err) || errors.Is(err, exec.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
 	}
 
+	var names []string
 	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if name == "" || name == excludeName {
 			continue
@@ -2256,19 +2290,11 @@ func KillSessionsWithEnvValue(envKey, envValue, excludeName string) {
 		}
 		// Output format: "KEY=value\n"
 		line := strings.TrimSpace(string(val))
-		if idx := strings.IndexByte(line, '='); idx >= 0 {
-			if line[idx+1:] == envValue {
-				statusLog.Warn("killing_duplicate_session",
-					slog.String("session", logging.SanitizeValue(name)),
-					slog.String("env_key", logging.SanitizeValue(envKey)),
-					slog.String("env_value", logging.SanitizeValue(envValue)),
-					slog.String("kept", logging.SanitizeValue(excludeName)))
-				// Bounded — see tmuxMutationTimeout. Best-effort already (error
-				// discarded), so a timeout changes nothing but the wait.
-				_ = runBoundedMutation(socket, "kill-session", "-t", name)
-			}
+		if idx := strings.IndexByte(line, '='); idx >= 0 && line[idx+1:] == envValue {
+			names = append(names, name)
 		}
 	}
+	return names, nil
 }
 
 // generateShortID generates a short random ID for uniqueness
