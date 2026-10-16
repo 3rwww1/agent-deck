@@ -1,6 +1,12 @@
 package session
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
+)
 
 func saveAndReloadOpenCodeLane(t *testing.T, storage *Storage, inst *Instance) *Instance {
 	t.Helper()
@@ -38,5 +44,24 @@ func TestSetFieldOpenCodeSessionID_ClearPersists(t *testing.T) {
 	}
 	if rebound := saveAndReloadOpenCodeLane(t, storage, cleared); rebound.OpenCodeSessionID != "ses_NEW" {
 		t.Fatalf("after rebind and reload: id %q, want ses_NEW", rebound.OpenCodeSessionID)
+	}
+}
+
+// Stop syncs ids from the pane env before the kill; for OpenCode that env is a
+// copy of the binding, and a stale copy must not undo a rebind on disk.
+func TestSyncSessionIDsFromTmux_OpenCodeEnvNeverReplacesBinding(t *testing.T) {
+	bin := t.TempDir()
+	script := "#!/bin/sh\ncase \"$*\" in *show-environment*OPENCODE_SESSION_ID*) echo OPENCODE_SESSION_ID=ses_OLD;; *show-environment*) exit 1;; esac\n"
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	for bound, want := range map[string]string{"ses_NEW": "ses_NEW", "": "ses_OLD"} {
+		inst := &Instance{Tool: "opencode", OpenCodeSessionID: bound, tmuxSession: &tmux.Session{Name: "agentdeck_lane"}}
+		inst.SyncSessionIDsFromTmux()
+		if inst.OpenCodeSessionID != want {
+			t.Fatalf("bound %q: after sync id %q, want %q", bound, inst.OpenCodeSessionID, want)
+		}
 	}
 }
