@@ -45,16 +45,20 @@ func (i *Instance) OpenCodeSSETarget() (SSETarget, bool) {
 	return SSETarget{InstanceID: i.ID, sessionID: sessionID, service: i.resolveOpenCodeService, parentOf: i.openCodeSessionParent}, true
 }
 
-// resolveOpenCodeService asks the session's OpenCode binary where its
-// background service listens (`opencode service status` prints the URL) and
-// reads the service password from the registration file the service writes
-// for its own clients. The password is used only when that file describes the
-// same URL, and only for a loopback URL.
+// resolveOpenCodeService reuses the guard's checked service so reconnects skip `service status`.
 func (i *Instance) resolveOpenCodeService() (openCodeService, error) {
 	binary, ok := i.openCodeLaunchBinary()
 	if !ok {
 		return openCodeService{}, errors.New("opencode binary not found")
 	}
+	if svc, ok := sharedOpenCodeService.attach(binary); ok {
+		return svc, nil
+	}
+	return openCodeServiceStatus(binary)
+}
+
+// openCodeServiceStatus trusts the registration file's password only for the URL the binary reports.
+func openCodeServiceStatus(binary string) (openCodeService, error) {
 	out, err := runModelProbeCommand(binary, "service", "status")
 	if err != nil {
 		return openCodeService{}, err
