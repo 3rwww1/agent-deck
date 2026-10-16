@@ -1912,7 +1912,10 @@ func (i *Instance) Start() (startErr error) {
 		}
 		_ = i.tmuxSession.SetEnvironment("GEMINI_YOLO_MODE", yoloVal)
 	}
-	// OpenCode and Codex IDs are detected asynchronously; SyncSessionIDsToTmux() handles
+	if i.Tool == "opencode" && i.OpenCodeSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("OPENCODE_SESSION_ID", i.OpenCodeSessionID)
+	}
+	// Codex IDs are detected asynchronously; SyncSessionIDsToTmux() handles
 	// propagation once they are available.
 	// Copilot session ID propagation (if already known from prior session)
 	if i.CopilotSessionID != "" {
@@ -2283,6 +2286,9 @@ func (i *Instance) StartWithMessage(message string) (startErr error) {
 	}
 	if i.GeminiSessionID != "" {
 		_ = i.tmuxSession.SetEnvironment("GEMINI_SESSION_ID", i.GeminiSessionID)
+	}
+	if i.Tool == "opencode" && i.OpenCodeSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("OPENCODE_SESSION_ID", i.OpenCodeSessionID)
 	}
 	if i.Tool == "gemini" {
 		yoloVal := "false"
