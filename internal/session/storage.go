@@ -448,6 +448,7 @@ func (s *Storage) saveWithGroups(instances []*Instance, groupTree *GroupTree) ([
 		return nil, fmt.Errorf("storage database not initialized")
 	}
 	UpdateClaudeSessionsWithDedup(instances)
+	UpdateOpenCodeSessionsWithDedup(instances)
 	updates := make([]statedb.InstanceSnapshot, len(instances))
 	clearIntents := make([]bool, len(instances))
 	openCodeClears := make([]bool, len(instances))
