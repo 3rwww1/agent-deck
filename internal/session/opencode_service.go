@@ -10,6 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/asheshgoplani/agent-deck/internal/procowner"
 )
 
 // OpenCodeSSETarget returns the event stream that feeds this instance's
@@ -57,11 +60,20 @@ func (i *Instance) resolveOpenCodeService() (openCodeService, error) {
 	return openCodeServiceStatus(binary)
 }
 
+// openCodeServiceCommandTimeout outlasts the 2 s health probe behind `service status`, plus CLI startup.
+var openCodeServiceCommandTimeout = 5 * time.Second
+
+// isOpenCodeServiceProcess rejects a stale registration whose pid now runs something else.
+var isOpenCodeServiceProcess = procowner.IsOpenCodeSharedServicePID
+
 // openCodeServiceStatus trusts the registration file's password only for the URL the binary reports.
 func openCodeServiceStatus(binary string) (openCodeService, error) {
-	out, err := runModelProbeCommand(binary, "service", "status")
+	out, err := runProbeCommandWithin(openCodeServiceCommandTimeout, binary, "service", "status")
 	if err != nil {
 		return openCodeService{}, err
+	}
+	if strings.TrimSpace(string(out)) == "stopped" {
+		return openCodeStoppedServiceStatus(binary)
 	}
 	serviceURL, err := parseOpenCodeServiceURL(string(out))
 	if err != nil {
@@ -86,30 +98,60 @@ func parseOpenCodeServiceURL(out string) (string, error) {
 	return line, nil
 }
 
-// openCodeServicePassword reads $XDG_STATE_HOME/opencode/service.json
-// (default ~/.local/state), the 0600 registration file OpenCode 2.x writes
-// for the running service. Empty when absent or for a different URL.
-func openCodeServicePassword(serviceURL string) string {
+var (
+	errOpenCodeServiceStopped  = errors.New("opencode background service is stopped")
+	errOpenCodeServiceDisabled = errors.New("opencode background service is disabled")
+)
+
+// openCodeStoppedServiceStatus splits "stopped" into disabled, stalled (registered, still the service) and stopped.
+func openCodeStoppedServiceStatus(binary string) (openCodeService, error) {
+	if out, err := runProbeCommandWithin(openCodeServiceCommandTimeout, binary, "service", "get", "disabled"); err == nil && strings.TrimSpace(string(out)) == "true" {
+		return openCodeService{}, errOpenCodeServiceDisabled
+	}
+	reg, ok := readOpenCodeServiceRegistration()
+	if !ok || !isOpenCodeServiceProcess(reg.PID) {
+		return openCodeService{}, errOpenCodeServiceStopped
+	}
+	serviceURL, err := parseOpenCodeServiceURL(reg.URL)
+	if err != nil {
+		return openCodeService{}, err
+	}
+	return openCodeService{URL: serviceURL, Password: reg.Password}, nil
+}
+
+type openCodeServiceRegistration struct {
+	URL      string `json:"url"`
+	PID      int    `json:"pid"`
+	Password string `json:"password"`
+}
+
+// readOpenCodeServiceRegistration reads the file OpenCode 2.x writes for its running service.
+func readOpenCodeServiceRegistration() (openCodeServiceRegistration, bool) {
 	stateHome := os.Getenv("XDG_STATE_HOME")
 	if stateHome == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return ""
+			return openCodeServiceRegistration{}, false
 		}
 		stateHome = filepath.Join(home, ".local", "state")
 	}
 	data, err := os.ReadFile(filepath.Join(stateHome, "opencode", "service.json"))
 	if err != nil {
-		return ""
+		return openCodeServiceRegistration{}, false
 	}
-	var reg struct {
-		URL      string `json:"url"`
-		Password string `json:"password"`
+	var reg openCodeServiceRegistration
+	if json.Unmarshal(data, &reg) != nil {
+		return openCodeServiceRegistration{}, false
 	}
-	if json.Unmarshal(data, &reg) != nil || strings.TrimRight(reg.URL, "/") != serviceURL {
-		return ""
+	reg.URL = strings.TrimRight(reg.URL, "/")
+	return reg, true
+}
+
+func openCodeServicePassword(serviceURL string) string {
+	if reg, ok := readOpenCodeServiceRegistration(); ok && reg.URL == serviceURL {
+		return reg.Password
 	}
-	return reg.Password
+	return ""
 }
 
 // openCodeSessionParent asks the shared service which session spawned

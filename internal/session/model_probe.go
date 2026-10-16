@@ -402,6 +402,10 @@ func runModelProbeCommand(path string, args ...string) ([]byte, error) {
 	return runModelProbeCommandIn(modelProbeTimeout, "", nil, path, args...)
 }
 
+func runProbeCommandWithin(timeout time.Duration, path string, args ...string) ([]byte, error) {
+	return runModelProbeCommandIn(timeout, "", nil, path, args...)
+}
+
 // runModelProbeCommandIn runs a probe command in dir (empty: inherited) with
 // env added to the child launch environment and its own timeout.
 func runModelProbeCommandIn(timeout time.Duration, dir string, env []string, path string, args ...string) ([]byte, error) {
