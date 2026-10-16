@@ -8676,7 +8676,9 @@ func (i *Instance) SyncSessionIDsFromTmux() {
 		i.GeminiSessionID = id
 	}
 
-	if id, err := i.tmuxSession.GetEnvironment("OPENCODE_SESSION_ID"); err == nil && id != "" {
+	// agent-deck writes OPENCODE_SESSION_ID from the binding, so it can only
+	// fill a binding this process has not loaded, never replace a newer one.
+	if id, err := i.tmuxSession.GetEnvironment("OPENCODE_SESSION_ID"); err == nil && id != "" && i.OpenCodeSessionID == "" {
 		i.OpenCodeSessionID = id
 	}
 
