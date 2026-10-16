@@ -65,6 +65,9 @@ func (i *Instance) DetectOpenCodeSession() {
 // fallback) and match by project directory, picking the most recently updated
 // session since OpenCode auto-resumes the last session.
 func (i *Instance) detectOpenCodeSessionAsync() {
+	if i.openCodeBoundOnSharedService() {
+		return
+	}
 	time.Sleep(1 * time.Second)
 
 	// Phase 1: Quick detection for existing sessions (5 attempts over ~15s)

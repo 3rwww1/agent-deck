@@ -867,6 +867,9 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 	if cmd, ok := i.openCodeLauncher(baseCommand); ok {
 		var extraFlags string
 		if i.openCodeRejectsV1LaunchFlags() {
+			if i.openCodeV2LaunchesBare() {
+				i.bindMintedOpenCodeSession()
+			}
 			// V2 uses the shared service instead of a per-TUI --port server.
 			i.setOpenCodePort(0)
 			return envPrefix + i.buildOpenCodeV2Command(cmd)
@@ -881,7 +884,7 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 				cmd, shellescape.Quote(i.OpenCodeSessionID), extraFlags, i.openCodeResumeDirArg())
 		}
 
-		// Start OpenCode fresh - session ID will be captured async after startup
+		// 1.x only: a 2.x lane was bound by bindMintedOpenCodeSession above.
 		return envPrefix + cmd + extraFlags
 	}
 
