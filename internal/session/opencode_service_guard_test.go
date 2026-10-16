@@ -14,10 +14,12 @@ import (
 )
 
 type stubOpenCodeService struct {
-	mu     sync.Mutex
-	now    time.Time
-	answer atomic.Bool
-	probes atomic.Int32
+	mu      sync.Mutex
+	now     time.Time
+	stopped bool
+	answer  atomic.Bool
+	probes  atomic.Int32
+	starts  atomic.Int32
 }
 
 func (f *stubOpenCodeService) clock() time.Time {
@@ -32,12 +34,27 @@ func (f *stubOpenCodeService) advance(d time.Duration) {
 	f.mu.Unlock()
 }
 
-// guard is one agent-deck process.
-func (f *stubOpenCodeService) guard() *openCodeServiceGuard {
+// guard is one agent-deck process; guards on one lockDir share its lock like separate processes.
+func (f *stubOpenCodeService) guard(lockDir string) *openCodeServiceGuard {
 	g := newOpenCodeServiceGuard()
 	g.now = f.clock
+	g.lockDir = func() (string, error) { return lockDir, nil }
 	g.status = func(string) (openCodeService, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.stopped {
+			return openCodeService{}, errOpenCodeServiceStopped
+		}
 		return openCodeService{URL: "http://127.0.0.1:49374", Password: "secret"}, nil
+	}
+	g.run = func(_, action string) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if action == "start" {
+			f.starts.Add(1)
+			f.stopped = false
+		}
+		return nil
 	}
 	g.healthy = func(openCodeService) bool {
 		f.probes.Add(1)
@@ -46,10 +63,43 @@ func (f *stubOpenCodeService) guard() *openCodeServiceGuard {
 	return g
 }
 
+func attachConcurrently(guards []*openCodeServiceGuard, perGuard int) (attached int32) {
+	var wg sync.WaitGroup
+	var n atomic.Int32
+	for _, g := range guards {
+		for range perGuard {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, ok := g.attach("opencode"); ok {
+					n.Add(1)
+				}
+			}()
+		}
+	}
+	wg.Wait()
+	return n.Load()
+}
+
+// A dozen lanes in two processes find the service stopped: one start, and every lane attaches.
+func TestOpenCodeServiceGuard_StoppedServiceStartsOnce(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), stopped: true}
+	fake.answer.Store(true)
+	lockDir := t.TempDir()
+	guards := []*openCodeServiceGuard{fake.guard(lockDir), fake.guard(lockDir)}
+
+	if got := attachConcurrently(guards, 6); got != 12 {
+		t.Fatalf("attached %d of 12 lanes", got)
+	}
+	if got := fake.starts.Load(); got != 1 {
+		t.Fatalf("starts = %d, want 1", got)
+	}
+}
+
 // A silent service is never cached; a healthy one is probed once per TTL, however many lanes attach.
 func TestOpenCodeServiceGuard_HealthyServiceIsProbedOncePerTTL(t *testing.T) {
 	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
-	g := fake.guard()
+	g := fake.guard(t.TempDir())
 
 	if _, ok := g.attach("opencode"); ok {
 		t.Fatal("attached a lane to a silent service")
@@ -97,11 +147,36 @@ func TestResolveOpenCodeService_ReconnectsReuseHealthyService(t *testing.T) {
 	}
 }
 
+// A disabled setting that cannot be read fails closed: the service the user may have turned off is never started.
+func TestOpenCodeServiceGuard_UnreadableDisabledSettingNeverStarts(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "opencode")
+	script := "#!/bin/sh\ncase \"$*\" in\n'service status') echo stopped ;;\n'service get disabled') echo 'config unreadable' >&2; exit 1 ;;\nesac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registerOpenCodeService(t, "", 0, "")
+	g := newOpenCodeServiceGuard()
+	g.lockDir = func() (string, error) { return t.TempDir(), nil }
+	var actions []string
+	g.run = func(_, action string) error {
+		actions = append(actions, action)
+		return nil
+	}
+
+	if _, ok := g.attach(bin); ok {
+		t.Fatal("attached a lane with no service running")
+	}
+	if len(actions) > 0 {
+		t.Fatalf("ran %v with the disabled setting unreadable, want nothing", actions)
+	}
+}
+
 // useFreshOpenCodeServiceGuard swaps in a new process-wide guard for the test.
 func useFreshOpenCodeServiceGuard(t *testing.T) *openCodeServiceGuard {
 	t.Helper()
 	prev := sharedOpenCodeService
 	sharedOpenCodeService = newOpenCodeServiceGuard()
+	sharedOpenCodeService.lockDir = func() (string, error) { return t.TempDir(), nil }
 	t.Cleanup(func() { sharedOpenCodeService = prev })
 	return sharedOpenCodeService
 }
