@@ -110,6 +110,11 @@ func openCodeStoppedServiceStatus(binary string) (openCodeService, error) {
 	if strings.TrimSpace(string(out)) == "true" {
 		return openCodeService{}, errOpenCodeServiceDisabled
 	}
+	return openCodeRegisteredService()
+}
+
+// openCodeRegisteredService is the service the registration file names, while its process lives.
+func openCodeRegisteredService() (openCodeService, error) {
 	reg, ok := readOpenCodeServiceRegistration()
 	if !ok || !isOpenCodeServiceProcess(reg.PID) {
 		return openCodeService{}, errOpenCodeServiceStopped
