@@ -38,6 +38,20 @@ type CommandReader interface {
 	Commands() (map[int]ProcCommand, error)
 }
 
+// IsOpenCodeSharedServicePID answers false for an unreadable process table: never act on a pid you cannot identify.
+func IsOpenCodeSharedServicePID(pid int) bool {
+	reader, ok := NewProber().(CommandReader)
+	if !ok || pid <= 0 {
+		return false
+	}
+	table, err := reader.Commands()
+	if err != nil {
+		return false
+	}
+	cmd, ok := table[pid]
+	return ok && isOpenCodeSharedService(cmd.Args)
+}
+
 // maxSharedServiceHops bounds the ancestry walk; a real tree is a few levels
 // deep, and a cycle in a non-atomic snapshot must not spin.
 const maxSharedServiceHops = 64
