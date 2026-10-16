@@ -2863,6 +2863,9 @@ func codexRolloutExistsInHome(sessionID, codexHome string) bool {
 	return codexRolloutPathInHome(sessionID, codexHome) != ""
 }
 
+// Swapped by tests: the detection outlives a test and races its cleanup.
+var startOpenCodeDetectionAfterRestart = func(i *Instance) { go i.detectOpenCodeSessionAsync() }
+
 // detectOpenCodeSessionAsync detects the OpenCode session ID after startup
 // OpenCode generates session IDs internally (format: ses_XXXXX)
 // We query the managed OpenCode HTTP server (or the bounded compatibility CLI
@@ -7834,7 +7837,21 @@ func (i *Instance) applyOpenCodeSessionCandidate(candidate string) bool {
 		i.mu.Unlock()
 		return false
 	}
+	ownTmuxName := ""
+	if i.tmuxSession != nil {
+		ownTmuxName = i.tmuxSession.Name
+	}
+	i.mu.Unlock()
 
+	// The restart sweep kills every other pane carrying the id, so taking a sibling's id kills the sibling.
+	if openCodeSessionHeldElsewhere(candidate, ownTmuxName) {
+		sessionLog.Warn("opencode_session_candidate_held_elsewhere",
+			slog.String("instance_id", i.ID),
+			slog.String("session_id", candidate))
+		return false
+	}
+
+	i.mu.Lock()
 	if i.OpenCodeSessionID != "" {
 		lastActivity := i.GetLastActivityTime()
 		if !lastActivity.IsZero() && time.Since(lastActivity) <= opencodeRotationActivityWindow {
@@ -10474,7 +10491,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 
 		// If no session ID, start async detection
 		if i.OpenCodeSessionID == "" {
-			go i.detectOpenCodeSessionAsync()
+			startOpenCodeDetectionAfterRestart(i)
 		}
 
 		sessionLog.Info("restart_opencode_respawn_succeeded")
