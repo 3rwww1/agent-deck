@@ -2279,6 +2279,9 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 	if cmd, ok := i.openCodeLauncher(baseCommand); ok {
 		var extraFlags string
 		if i.openCodeRejectsV1LaunchFlags() {
+			if i.openCodeV2LaunchesBare() {
+				i.bindMintedOpenCodeSession()
+			}
 			// V2 uses the shared service instead of a per-TUI --port server.
 			i.setOpenCodePort(0)
 			return envPrefix + i.buildOpenCodeV2Command(cmd)
@@ -2293,7 +2296,7 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 				cmd, i.OpenCodeSessionID, extraFlags, i.openCodeResumeDirArg())
 		}
 
-		// Start OpenCode fresh - session ID will be captured async after startup
+		// 1.x only: a 2.x lane was bound by bindMintedOpenCodeSession above.
 		return envPrefix + cmd + extraFlags
 	}
 
@@ -2943,6 +2946,9 @@ func codexRolloutExistsInHome(sessionID, codexHome string) bool {
 // fallback) and match by project directory, picking the most recently updated
 // session since OpenCode auto-resumes the last session.
 func (i *Instance) detectOpenCodeSessionAsync() {
+	if i.openCodeBoundOnSharedService() {
+		return
+	}
 	time.Sleep(1 * time.Second)
 
 	// Phase 1: Quick detection for existing sessions (5 attempts over ~15s)
@@ -5919,7 +5925,10 @@ func (i *Instance) Start() (startErr error) {
 		}
 		_ = i.tmuxSession.SetEnvironment("GEMINI_YOLO_MODE", yoloVal)
 	}
-	// OpenCode and Codex IDs are detected asynchronously; SyncSessionIDsToTmux() handles
+	if i.Tool == "opencode" && i.OpenCodeSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("OPENCODE_SESSION_ID", i.OpenCodeSessionID)
+	}
+	// Codex IDs are detected asynchronously; SyncSessionIDsToTmux() handles
 	// propagation once they are available.
 	// Copilot session ID propagation (if already known from prior session)
 	if i.CopilotSessionID != "" {
@@ -6277,6 +6286,9 @@ func (i *Instance) StartWithMessage(message string) (startErr error) {
 	}
 	if i.GeminiSessionID != "" {
 		_ = i.tmuxSession.SetEnvironment("GEMINI_SESSION_ID", i.GeminiSessionID)
+	}
+	if i.Tool == "opencode" && i.OpenCodeSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("OPENCODE_SESSION_ID", i.OpenCodeSessionID)
 	}
 	if i.Tool == "gemini" {
 		yoloVal := "false"
