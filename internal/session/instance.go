@@ -288,6 +288,9 @@ type Instance struct {
 	// MergeToolDataExtras does not resurrect a prior binding. Not persisted;
 	// a non-empty GenericSessionID always clears this flag.
 	genericSessionIDCleared bool
+	// openCodeSessionIDCleared is the same explicit-clear intent for
+	// OpenCodeSessionID.
+	openCodeSessionIDCleared bool
 	// genericSessionPersistErr holds why the last custom-tool conversation-id
 	// write-through failed, so a bind that never reached disk can be told from
 	// one that did. Read through GenericSessionPersistError.
@@ -3042,6 +3045,7 @@ func (i *Instance) setOpenCodeSessionLocked(sessionID string) {
 	i.OpenCodeSessionID = sessionID
 	i.OpenCodeDetectedAt = time.Now()
 	i.OpenCodeStartedAt = 0
+	i.openCodeSessionIDCleared = false
 }
 
 func (i *Instance) syncOpenCodeSessionEnvironment(tmuxSession *tmux.Session, sessionID string) {

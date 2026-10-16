@@ -372,8 +372,12 @@ func SetField(inst *Instance, field, value string, extraArgsTokens []string) (ol
 		if err != nil {
 			return oldValue, nil, err
 		}
-		inst.OpenCodeSessionID = normalized
-		inst.OpenCodeDetectedAt = time.Now()
+		if normalized == "" {
+			inst.clearOpenCodeSessionBinding()
+		} else {
+			inst.setOpenCodeSessionLocked(normalized)
+		}
+		postCommit = makeGenericSessionEnvPostCommit(inst, normalized, []string{"OPENCODE_SESSION_ID"})
 
 	case FieldCodexSessionID:
 		oldValue = inst.CodexSessionID
