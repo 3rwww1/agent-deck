@@ -729,7 +729,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 
 		// If no session ID, start async detection
 		if i.OpenCodeSessionID == "" {
-			go i.detectOpenCodeSessionAsync()
+			startOpenCodeDetectionAfterRestart(i)
 		}
 
 		sessionLog.Info("restart_opencode_respawn_succeeded")

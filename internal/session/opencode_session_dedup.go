@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/procowner"
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
 // The restart sweep kills every pane sharing OPENCODE_SESSION_ID, so a duplicate kills its sibling.
@@ -28,6 +29,12 @@ var readOpenCodePanePID = func(inst *Instance) int {
 		}
 	}
 	return 0
+}
+
+// openCodeSessionHeldElsewhere answers yes when tmux cannot list its sessions: a wrong no kills the holder.
+var openCodeSessionHeldElsewhere = func(id, ownTmuxName string) bool {
+	holder, err := tmux.OtherSessionWithEnvValue("OPENCODE_SESSION_ID", id, ownTmuxName)
+	return err != nil || holder != ""
 }
 
 // UpdateOpenCodeSessionsWithDedup keeps each OpenCode session id on one lane
