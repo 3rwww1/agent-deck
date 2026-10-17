@@ -11669,7 +11669,11 @@ func (i *Instance) forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath strin
 		if err != nil {
 			return "", "", err
 		}
-		if err := applyOpenCodeForkOverridesViaService(binary, childID, workDir, serviceOpts); err != nil {
+		err = i.moveOpenCodeForkViaService(binary, childID, workDir)
+		if err == nil {
+			err = applyOpenCodeForkOverridesViaService(binary, childID, workDir, serviceOpts)
+		}
+		if err != nil {
 			if _, rmErr := runOpenCodeServiceCall(binary, workDir, "session.remove", childID, ""); rmErr != nil {
 				return "", "", fmt.Errorf("%w (remove child session %s: %v)", err, childID, rmErr)
 			}
@@ -11727,6 +11731,25 @@ func (i *Instance) forkOpenCodeSessionViaService(binary, parentID, workDir strin
 		slog.String("parent_session_id", parentID),
 		slog.String("child_session_id", childID))
 	return childID, nil
+}
+
+// moveOpenCodeForkViaService moves a 2.x fork child onto workDir when the
+// fork targets a different tree (a worktree fork). session.fork keeps the
+// child in the parent's directory, so without the move only the shell cwd
+// changes while the service session still belongs to the parent's tree. A
+// same-directory fork skips the call.
+func (i *Instance) moveOpenCodeForkViaService(binary, childID, workDir string) error {
+	if filepath.Clean(workDir) == filepath.Clean(i.ProjectPath) {
+		return nil
+	}
+	body, err := json.Marshal(map[string]string{"directory": workDir})
+	if err != nil {
+		return fmt.Errorf("opencode fork: encode move: %w", err)
+	}
+	if _, err := runOpenCodeServiceCall(binary, workDir, "session.move", childID, string(body)); err != nil {
+		return fmt.Errorf("opencode fork: move child session %s to %s: %w", childID, workDir, err)
+	}
+	return nil
 }
 
 // applyOpenCodeForkOverridesViaService sets the fork's model and agent
