@@ -1,11 +1,15 @@
 package session
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,12 +18,14 @@ import (
 )
 
 type stubOpenCodeService struct {
-	mu      sync.Mutex
-	now     time.Time
-	stopped bool
-	answer  atomic.Bool
-	probes  atomic.Int32
-	starts  atomic.Int32
+	mu       sync.Mutex
+	now      time.Time
+	stopped  bool
+	answer   atomic.Bool
+	rejects  atomic.Bool // answers the probe with an error instead of staying silent
+	probes   atomic.Int32
+	starts   atomic.Int32
+	restarts atomic.Int32
 }
 
 func (f *stubOpenCodeService) clock() time.Time {
@@ -50,15 +56,24 @@ func (f *stubOpenCodeService) guard(lockDir string) *openCodeServiceGuard {
 	g.run = func(_, action string) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if action == "start" {
+		switch action {
+		case "start":
 			f.starts.Add(1)
 			f.stopped = false
+		case "restart":
+			f.restarts.Add(1)
 		}
 		return nil
 	}
-	g.healthy = func(openCodeService) bool {
+	g.probe = func(openCodeService) error {
 		f.probes.Add(1)
-		return f.answer.Load()
+		switch {
+		case f.answer.Load():
+			return nil
+		case f.rejects.Load():
+			return errors.New("opencode service health probe: HTTP 401 Unauthorized")
+		}
+		return errOpenCodeServiceSilent
 	}
 	return g
 }
@@ -96,6 +111,90 @@ func TestOpenCodeServiceGuard_StoppedServiceStartsOnce(t *testing.T) {
 	}
 }
 
+// A dozen lanes in two processes hit a stall: no restart within the grace, then exactly one.
+func TestOpenCodeServiceGuard_StallRestartsOnceAfterGrace(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+	lockDir := t.TempDir()
+	guards := []*openCodeServiceGuard{fake.guard(lockDir), fake.guard(lockDir)}
+
+	for elapsed := time.Duration(0); elapsed < openCodeServiceStallGrace; elapsed += 30 * time.Second {
+		if got := attachConcurrently(guards, 6); got != 0 {
+			t.Fatalf("attached %d lanes to a stalled service", got)
+		}
+		if got := fake.restarts.Load(); got != 0 {
+			t.Fatalf("restarted %d times %s into a stall, want none before %s", got, elapsed, openCodeServiceStallGrace)
+		}
+		fake.advance(30 * time.Second)
+	}
+
+	attachConcurrently(guards, 6)
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts after the grace period = %d, want exactly 1", got)
+	}
+}
+
+func TestOpenCodeServiceGuard_StallThatClearsNeverRestarts(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+	g := fake.guard(t.TempDir())
+
+	g.attach("opencode")
+	fake.advance(openCodeServiceStallGrace / 2)
+	fake.answer.Store(true)
+	if _, ok := g.attach("opencode"); !ok {
+		t.Fatal("service answers again but attach failed")
+	}
+	fake.answer.Store(false)
+	fake.advance(openCodeServiceStallGrace)
+	g.attach("opencode")
+	if got := fake.restarts.Load(); got != 0 {
+		t.Fatalf("restarts = %d, want 0 (two short stalls are not one long one)", got)
+	}
+}
+
+// A service that rejects the probe (a 401 from a password agent-deck cannot read, a 503 while it boots) is up, not stalled.
+func TestOpenCodeServiceGuard_RejectedProbeNeverRestarts(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+	fake.rejects.Store(true)
+	g := fake.guard(t.TempDir())
+
+	for elapsed := time.Duration(0); elapsed <= 2*openCodeServiceStallGrace; elapsed += 30 * time.Second {
+		if _, ok := g.attach("opencode"); ok {
+			t.Fatal("attached a lane to a service that rejects its probe")
+		}
+		fake.advance(30 * time.Second)
+	}
+	if got := fake.restarts.Load(); got != 0 {
+		t.Fatalf("restarted a service that answers %d times, want 0", got)
+	}
+}
+
+// Only a probe that gets no answer in time is silence; an error answer or a refused connection is not.
+func TestProbeOpenCodeService_TellsSilenceFromRejection(t *testing.T) {
+	release := make(chan struct{})
+	silent := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() { close(release); silent.Close() })
+	rejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusUnauthorized)
+	}))
+	t.Cleanup(rejecting.Close)
+	refused := httptest.NewServer(http.NotFoundHandler())
+	refused.Close()
+
+	if err := probeOpenCodeService(openCodeService{URL: silent.URL}); !errors.Is(err, errOpenCodeServiceSilent) {
+		t.Fatalf("silent service: probe = %v, want %v", err, errOpenCodeServiceSilent)
+	}
+	for name, url := range map[string]string{"401": rejecting.URL, "refused": refused.URL} {
+		if err := probeOpenCodeService(openCodeService{URL: url}); err == nil || errors.Is(err, errOpenCodeServiceSilent) {
+			t.Fatalf("%s: probe = %v, want an error that is not silence", name, err)
+		}
+	}
+}
+
 // A silent service is never cached; a healthy one is probed once per TTL, however many lanes attach.
 func TestOpenCodeServiceGuard_HealthyServiceIsProbedOncePerTTL(t *testing.T) {
 	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
@@ -104,6 +203,7 @@ func TestOpenCodeServiceGuard_HealthyServiceIsProbedOncePerTTL(t *testing.T) {
 	if _, ok := g.attach("opencode"); ok {
 		t.Fatal("attached a lane to a silent service")
 	}
+	fake.advance(openCodeServiceRetryGap)
 	fake.answer.Store(true)
 	for range 10 {
 		if _, ok := g.attach("opencode"); !ok {
@@ -144,6 +244,193 @@ func TestResolveOpenCodeService_ReconnectsReuseHealthyService(t *testing.T) {
 	logged, _ := os.ReadFile(calls)
 	if n := strings.Count(string(logged), "service status"); n != 1 {
 		t.Fatalf("service status ran %d times for 3 reconnects, want 1:\n%s", n, logged)
+	}
+}
+
+// A 2.x launch attaches with --server and reads the password in the pane, never in the command.
+func TestBuildOpenCodeCommand_V2AttachesToSharedService(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	const password = "registration-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user, pass, ok := r.BasicAuth(); r.URL.Path != "/api/info" || !ok || user != "opencode" || pass != password {
+			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"version":"2.0.25"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	useOpenCodeStub(t, fmt.Sprintf("#!/bin/sh\n[ \"$1 $2\" = 'service status' ] && echo %s\n", srv.URL))
+	registerOpenCodeService(t, srv.URL, 1, password)
+	useFreshOpenCodeServiceGuard(t)
+
+	inst := &Instance{Tool: "opencode", OpenCodeSessionID: "ses_BOUND"}
+	cmd := inst.buildOpenCodeCommand("opencode")
+	if !strings.Contains(cmd, " --server "+srv.URL+" -s ses_BOUND") {
+		t.Fatalf("launch does not attach to the shared service: %q", cmd)
+	}
+	if !strings.Contains(cmd, `OPENCODE_PASSWORD="$(`) || !strings.Contains(cmd, ` service get password)" `) {
+		t.Fatalf("launch does not read the service password in the pane: %q", cmd)
+	}
+	if strings.Contains(cmd, password) {
+		t.Fatalf("launch command carries the service password: %q", cmd)
+	}
+}
+
+// Lanes in one sweep share a failed verdict; a disabled service is not asked again within the TTL.
+func TestOpenCodeServiceGuard_SharesFailedVerdicts(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		reused time.Duration
+	}{
+		{name: "silent", reused: openCodeServiceRetryGap},
+		{name: "disabled", err: errOpenCodeServiceDisabled, reused: openCodeServiceHealthTTL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+			g := fake.guard(t.TempDir())
+			statuses := 0
+			g.status = func(string) (openCodeService, error) {
+				statuses++
+				return openCodeService{URL: "http://127.0.0.1:49374"}, tc.err
+			}
+			for range 5 {
+				g.attach("opencode")
+			}
+			fake.advance(tc.reused - time.Second)
+			g.attach("opencode")
+			if statuses != 1 {
+				t.Fatalf("status asked %d times within %s, want 1", statuses, tc.reused)
+			}
+			fake.advance(time.Second)
+			g.attach("opencode")
+			if statuses != 2 {
+				t.Fatalf("status asked %d times after %s, want 2", statuses, tc.reused)
+			}
+		})
+	}
+}
+
+// A service call goes to the healthy service, and otherwise to a standalone `opencode api`, never a bare one.
+func TestRunOpenCodeServiceCall_TargetsSharedServiceOrStandalone(t *testing.T) {
+	const password = "registration-secret"
+	var removed atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, pass, ok := r.BasicAuth(); !ok || pass != password {
+			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodDelete && r.URL.Path == "/api/session/ses_X" {
+			removed.Add(1)
+			fmt.Fprint(w, "true")
+			return
+		}
+		fmt.Fprint(w, `{"version":"2.0.25"}`)
+	}))
+	t.Cleanup(srv.Close)
+	calls := filepath.Join(t.TempDir(), "calls")
+	bin := filepath.Join(t.TempDir(), "opencode")
+	script := fmt.Sprintf("#!/bin/sh\n[ \"$1 $2\" = 'service status' ] && { echo %s; exit 0; }\necho \"$* pw=${OPENCODE_PASSWORD:-}\" >> %s\n", srv.URL, calls)
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCODE_PASSWORD", "")
+	registerOpenCodeService(t, srv.URL, os.Getpid(), password)
+
+	for _, answering := range []bool{true, false} {
+		if !answering {
+			srv.Close()
+		}
+		useFreshOpenCodeServiceGuard(t)
+		if _, err := runOpenCodeServiceCall(bin, t.TempDir(), "session.remove", "ses_X", ""); err != nil {
+			t.Fatalf("session.remove (service answering: %v): %v", answering, err)
+		}
+	}
+	if got := removed.Load(); got != 1 {
+		t.Fatalf("service saw %d DELETE requests, want 1 while it answered", got)
+	}
+	logged, _ := os.ReadFile(calls)
+	want := "api session.remove --param sessionID=ses_X --standalone pw=\n"
+	if string(logged) != want {
+		t.Fatalf("opencode api calls =\n%s\nwant\n%s", logged, want)
+	}
+}
+
+// A lane launched bare runs OpenCode's own service check, which kills a silent service, so it waits instead.
+func TestBuildOpenCodeCommand_V2WaitsForSilentRegisteredService(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "frozen", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct {
+		name         string
+		pid          int
+		disabled     bool
+		answersAfter int // `service status` calls in the pane before it prints the URL; 0 is never
+		wantWait     bool
+	}{
+		{name: "registered, answers again", pid: os.Getpid(), answersAfter: 2, wantWait: true},
+		{name: "registered, never answers", pid: os.Getpid(), wantWait: true},
+		{name: "not registered", pid: 0},
+		{name: "disabled", pid: os.Getpid(), disabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			useOpenCodeStub(t, fmt.Sprintf(`#!/bin/sh
+case "$*" in
+'service status') echo x >> %[1]s/status; [ %[4]d -gt 0 ] && [ "$(wc -l < %[1]s/status)" -ge %[4]d ] && echo %[2]s || echo stopped ;;
+'service get disabled') echo %[3]t ;;
+'service get password') echo secret ;;
+*) echo "$OPENCODE_PASSWORD $*" > %[1]s/launched ;;
+esac
+`, dir, srv.URL, tc.disabled, tc.answersAfter))
+			registerOpenCodeService(t, srv.URL, tc.pid, "secret")
+			useFreshOpenCodeServiceGuard(t)
+
+			cmd := (&Instance{Tool: "opencode", OpenCodeSessionID: "ses_BOUND"}).buildOpenCodeCommand("opencode")
+			if !tc.wantWait {
+				if strings.Contains(cmd, " --server ") {
+					t.Fatalf("launch attaches with no live registered service: %q", cmd)
+				}
+				return
+			}
+			if !strings.Contains(cmd, " --server "+srv.URL+" -s ses_BOUND") {
+				t.Fatalf("launch does not attach to the silent registered service: %q", cmd)
+			}
+
+			// sleep returns at once and records its interval, so the whole wait runs in milliseconds.
+			shims := t.TempDir()
+			if err := os.WriteFile(filepath.Join(shims, "sleep"), []byte("#!/bin/sh\necho \"$1\" >> "+dir+"/slept\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			_ = os.Remove(filepath.Join(dir, "status"))
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			pane := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+			pane.Env = append(os.Environ(), "PATH="+shims+":"+os.Getenv("PATH")+":/usr/bin:/bin")
+			if out, err := pane.CombinedOutput(); err != nil {
+				t.Fatalf("launch command did not finish: %v\n%s", err, out)
+			}
+
+			slept, _ := os.ReadFile(filepath.Join(dir, "slept"))
+			total := 0
+			for _, field := range strings.Fields(string(slept)) {
+				seconds, err := strconv.Atoi(field)
+				if err != nil || seconds < 5 {
+					t.Fatalf("wait polls every %q s, want 5 s or more: each poll is one opencode process", field)
+				}
+				total += seconds
+			}
+			if tc.answersAfter == 0 && time.Duration(total)*time.Second < openCodeServiceStallGrace {
+				t.Fatalf("wait gave up after %d s, before agent-deck restarts a stalled service (%s)", total, openCodeServiceStallGrace)
+			}
+			launched, _ := os.ReadFile(filepath.Join(dir, "launched"))
+			if got, want := strings.TrimSpace(string(launched)), "secret --server "+srv.URL+" -s ses_BOUND"; got != want {
+				t.Fatalf("pane launched %q, want %q after the wait", got, want)
+			}
+		})
 	}
 }
 

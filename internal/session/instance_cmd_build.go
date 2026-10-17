@@ -872,6 +872,10 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 			}
 			// V2 uses the shared service instead of a per-TUI --port server.
 			i.setOpenCodePort(0)
+			if i.OpenCodeSessionID != "" && !i.openCodeV2HasSessionOptions() {
+				return envPrefix + fmt.Sprintf("%s -s %s%s",
+					i.attachOpenCodeToSharedService(cmd), i.OpenCodeSessionID, i.openCodeResumeDirArg())
+			}
 			return envPrefix + i.buildOpenCodeV2Command(cmd)
 		} else {
 			extraFlags = i.buildOpenCodeExtraFlags() + i.buildOpenCodeSSEPortFlag()
