@@ -894,6 +894,10 @@ func reconcileTyping(dir string, rec *sendqueue.Record, set func(func(*sendqueue
 // typed/submitted with a reason: never landed, and never typed again.
 func watchLanded(profile string, rec *sendqueue.Record, set func(func(*sendqueue.Record)) error) {
 	harness := rowsHarness(rec.Tool)
+	if inst := openCodeLandingTarget(profile, rec); inst != nil {
+		watchOpenCodeLanded(profile, inst, rec, set)
+		return
+	}
 	if !query.SupportsDirectRows(harness) {
 		_ = set(func(r *sendqueue.Record) {
 			r.Settled = true
@@ -928,6 +932,58 @@ func watchLanded(profile string, rec *sendqueue.Record, set func(func(*sendqueue
 	_ = set(func(r *sendqueue.Record) {
 		if r.Reason == "" {
 			r.Reason = "not seen in the transcript within " + sendLandWindow().String()
+		}
+		r.Settled = true
+	})
+}
+
+// openCodeLandingTarget is the record's lane when it is a bound OpenCode 2.x lane, else nil.
+func openCodeLandingTarget(profile string, rec *sendqueue.Record) *session.Instance {
+	// A slash command lands as an OpenCode command, never as a user message carrying its text.
+	if rec.Tool != "opencode" || strings.HasPrefix(strings.TrimSpace(rec.Message), "/") {
+		return nil
+	}
+	_, instances, _, err := loadSessionData(profile)
+	if err != nil {
+		return nil
+	}
+	if inst := instanceByID(instances, rec.SessionID); inst != nil && inst.CanConfirmOpenCodeLanding() {
+		return inst
+	}
+	return nil
+}
+
+// findOpenCodeLanded is swapped in tests, which have no shared service to read.
+var findOpenCodeLanded = (*session.Instance).FindOpenCodeLanded
+
+// watchOpenCodeLanded is watchLanded for a bound OpenCode 2.x lane, read from its session on the shared service.
+func watchOpenCodeLanded(profile string, inst *session.Instance, rec *sendqueue.Record, set func(func(*sendqueue.Record)) error) {
+	sentAt, _ := time.Parse(time.RFC3339Nano, rec.SentAt)
+	landBy := time.Now().Add(sendLandWindow())
+	var lastErr error
+	for time.Now().Before(landBy) {
+		var id, ts string
+		id, ts, lastErr = findOpenCodeLanded(inst, rec.Message, sentAt)
+		if id != "" {
+			_ = set(func(r *sendqueue.Record) {
+				r.State, r.Reason, r.Verdict, r.LandedRowID, r.LandedAt = sendqueue.StateLanded, "", "delivered", id, ts
+			})
+			waitTurnStarted(profile, rec.SessionID, 5*time.Second)
+			return
+		}
+		if errors.Is(lastErr, session.ErrOpenCodeMessagesUnreadable) {
+			break
+		}
+		// Every lane's checks go to the one shared service, so this polls slower than a transcript read.
+		time.Sleep(time.Second)
+	}
+	reason := "not seen in the OpenCode session within " + sendLandWindow().String()
+	if lastErr != nil {
+		reason = "could not confirm landing: " + lastErr.Error()
+	}
+	_ = set(func(r *sendqueue.Record) {
+		if r.Reason == "" {
+			r.Reason = reason
 		}
 		r.Settled = true
 	})
