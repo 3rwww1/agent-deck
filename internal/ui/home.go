@@ -3392,8 +3392,35 @@ func (h *Home) rebuildFlatItemsAt(now time.Time) {
 			}
 		}
 		if len(filtered) == 0 && len(allItems) > 0 && !h.keepEmptyFilter && h.statusFilter != FilterModeActive {
-			h.statusFilter = ""
-			h.flatItems = allItems
+			// #2627 (CodeRabbit): remote rows count toward the fallback too —
+			// clearing the filter because no LOCAL row matches would bypass
+			// the remote filtering this PR adds, showing every remote row.
+			// Clear only when neither local nor remote rows match; keep the
+			// local list empty-but-filtered when a remote match survives.
+			// This branch never runs in the ^ archived view (the enclosing
+			// block excludes FilterModeArchived), so only active-partition
+			// remote rows can match. Hold the read lock like the remote
+			// snapshot below does.
+			remoteHasMatch := false
+			h.remoteSessionsMu.RLock()
+			for _, remoteSessions := range h.remoteSessions {
+				for _, remote := range remoteSessions {
+					if !remote.Archived && h.remoteMatchesStatus(h.statusFilter, remote) {
+						remoteHasMatch = true
+						break
+					}
+				}
+				if remoteHasMatch {
+					break
+				}
+			}
+			h.remoteSessionsMu.RUnlock()
+			if remoteHasMatch {
+				h.flatItems = filtered
+			} else {
+				h.statusFilter = ""
+				h.flatItems = allItems
+			}
 		} else {
 			h.flatItems = filtered
 		}
@@ -3417,6 +3444,14 @@ func (h *Home) rebuildFlatItemsAt(now time.Time) {
 		partitioned := make([]session.RemoteSessionInfo, 0, len(sessions))
 		for _, remote := range sessions {
 			if remote.Archived == viewArchived {
+				// #2627: remote rows honor the status filter the way local rows
+				// do. In the archived view the Archived partition IS the filter
+				// (same as local), so the predicate runs only outside it. Old
+				// remotes omit substate/archived — those decode to the zero
+				// status, degraded the same way the status glyph degrades it.
+				if h.statusFilter != "" && !viewArchived && !h.remoteMatchesStatus(h.statusFilter, remote) {
+					continue
+				}
 				partitioned = append(partitioned, remote)
 			}
 		}
@@ -3461,6 +3496,12 @@ func (h *Home) rebuildFlatItemsAt(now time.Time) {
 		}
 		for _, sessions := range remotes {
 			for _, remote := range sessions {
+				// #2627: the status filter narrows the time-fallback the same
+				// way it narrows local sessions above — a row the filter hides
+				// is neither a candidate nor a match.
+				if h.statusFilter != "" && !viewArchived && !h.remoteMatchesStatus(h.statusFilter, remote) {
+					continue
+				}
 				hasCandidates = true
 				if remoteMatchesTime(remote) {
 					hasMatches = true
@@ -6544,8 +6585,8 @@ func (h *Home) backgroundStatusUpdate() {
 			if st == session.StatusStopped {
 				continue
 			}
-			if port := inst.GetOpenCodePort(); port > 0 {
-				targets = append(targets, session.SSETarget{InstanceID: inst.ID, Port: port})
+			if target, ok := inst.OpenCodeSSETarget(); ok {
+				targets = append(targets, target)
 				if ss := h.sseWatcher.GetStatus(inst.ID); ss != nil {
 					inst.UpdateOpenCodeSSEStatus(ss.Status, ss.UpdatedAt)
 				}
@@ -6805,19 +6846,7 @@ func (h *Home) backgroundStatusUpdate() {
 		// the owning instance (or, for orphans, this primary's orphan sweep)
 		// is the source of truth for that session's status row. Orphans MUST
 		// be written here — that's the entire point of polling them above.
-		currentIDs := make(map[string]struct{}, len(instances))
-		for _, inst := range instances {
-			currentIDs[inst.ID] = struct{}{}
-			if !h.isPolledByMe(inst.ID) {
-				continue
-			}
-			status := string(inst.GetStatusThreadSafe())
-			if prev, ok := h.lastPersistedStatus[inst.ID]; ok && prev == status {
-				continue
-			}
-			_ = db.WriteStatus(inst.ID, status, inst.Tool)
-			h.lastPersistedStatus[inst.ID] = status
-		}
+		currentIDs := h.persistPolledStatuses(db, instances)
 		for id := range h.lastPersistedStatus {
 			if _, ok := currentIDs[id]; !ok {
 				delete(h.lastPersistedStatus, id)
@@ -7204,10 +7233,81 @@ func (h *Home) refreshAttachedSessionStatus(sessionID string) {
 		h.cachedStatusCounts.valid.Store(false)
 		h.publishCurrentSessionStates()
 		if db := statedb.GetGlobal(); db != nil {
-			_ = db.WriteStatus(inst.ID, string(newStatus), inst.GetToolThreadSafe())
+			committed, applied := writeStatusIfCurrent(db, inst.ID, string(oldStatus), string(newStatus), inst.GetToolThreadSafe())
+			if !applied && committed != "" && committed != string(newStatus) {
+				inst.SetStatusThreadSafe(session.Status(committed))
+				h.publishCurrentSessionStates()
+			}
 		}
 	}
 	h.refreshSessionRenderSnapshot(nil)
+}
+
+// persistPolledStatuses writes the status of every session this process
+// polls to the shared row, skipping unchanged ones, and returns the set of
+// current instance IDs. A write that loses to a status another process
+// committed (a CLI `session stop`, #2669) adopts the committed status.
+func (h *Home) persistPolledStatuses(db *statedb.StateDB, instances []*session.Instance) map[string]struct{} {
+	currentIDs := make(map[string]struct{}, len(instances))
+	adoptedCommitted := false
+	for _, inst := range instances {
+		currentIDs[inst.ID] = struct{}{}
+		if !h.isPolledByMe(inst.ID) {
+			continue
+		}
+		status := string(inst.GetStatusThreadSafe())
+		prev, ok := h.lastPersistedStatus[inst.ID]
+		if ok && prev == status {
+			continue
+		}
+		if !ok {
+			_ = db.WriteStatus(inst.ID, status, inst.Tool)
+			h.lastPersistedStatus[inst.ID] = status
+			continue
+		}
+		// Conditional on the row still holding what this Home last wrote
+		// (#2669): a CLI `session stop` commits "stopped" while this
+		// process still holds the pre-stop status in memory, and the
+		// sweep then classifies the vanished pane as "error". Last writer
+		// wins would turn the deliberate stop into an error.
+		committed, applied := writeStatusIfCurrent(db, inst.ID, prev, status, inst.Tool)
+		if !applied && committed != "" {
+			inst.SetStatusThreadSafe(session.Status(committed))
+			status = committed
+			adoptedCommitted = true
+		}
+		h.lastPersistedStatus[inst.ID] = status
+	}
+	if adoptedCommitted {
+		h.cachedStatusCounts.valid.Store(false)
+		h.publishWebSessionStates(instances)
+		h.refreshSessionRenderSnapshot(instances)
+	}
+	return currentIDs
+}
+
+// writeStatusIfCurrent persists status only while the shared row still holds
+// expected, so a status another process committed in between (a CLI
+// `session stop`, #2669) is not overwritten by this process's stale sample.
+// When the write loses, it returns the committed status for the caller to
+// adopt; committed is "" when the row could not be read or does not exist.
+func writeStatusIfCurrent(db *statedb.StateDB, id, expected, status, tool string) (committed string, applied bool) {
+	applied, err := db.WriteStatusIfCurrent(id, expected, status, tool)
+	if err != nil {
+		return "", false
+	}
+	if applied {
+		return status, true
+	}
+	rows, err := db.ReadAllStatuses()
+	if err != nil {
+		return "", false
+	}
+	row, ok := rows[id]
+	if !ok {
+		return "", false
+	}
+	return row.Status, false
 }
 
 func (h *Home) publishCurrentSessionStates() {
@@ -10276,19 +10376,8 @@ func (h *Home) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		selected := h.search.Selected()
 		if selected != nil {
-			// Ensure the session's group AND all parent groups are expanded so it's visible
-			if selected.GroupPath != "" {
-				h.groupTree.ExpandGroupWithParents(selected.GroupPath)
-			}
-			h.rebuildFlatItems()
-
-			// Find the session in flatItems (not instances) and set cursor
-			for i, item := range h.flatItems {
-				if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == selected.ID {
-					h.cursor = i
-					h.syncViewport() // Ensure the cursor is visible in the viewport
-					break
-				}
+			if !h.jumpToSessionByID(selected.ID, selected.GroupPath) {
+				h.setError(fmt.Errorf("'%s' not visible after clearing filters (session may be gone)", selected.Title))
 			}
 		}
 		h.search.Hide()
@@ -10308,6 +10397,70 @@ func (h *Home) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return h, cmd
+}
+
+// jumpToSessionByID moves the cursor to the session with the given ID,
+// expanding its group first. When the session is hidden by the active
+// status or time filter (the search indexes every instance, not the
+// filtered view), it clears those filters the same way the empty-view
+// fallbacks do and retries; the filters are restored untouched only when
+// the session is genuinely not present. Returns false in that last case.
+// Issue #2655.
+func (h *Home) jumpToSessionByID(id, groupPath string) bool {
+	find := func() bool {
+		for i, item := range h.flatItems {
+			if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == id {
+				h.cursor = i
+				h.syncViewport()
+				return true
+			}
+		}
+		return false
+	}
+
+	// Capture the pre-jump fold state of the target group and its ancestors
+	// so a failed jump restores them (#2656, CodeRabbit). Expansion runs
+	// once here; the retry path below only rebuilds.
+	prevExpanded := map[string]bool{}
+	if groupPath != "" {
+		for _, g := range h.groupTree.GroupList {
+			if g == nil {
+				continue
+			}
+			if g.Path == groupPath || strings.HasPrefix(groupPath, g.Path+"/") {
+				prevExpanded[g.Path] = g.Expanded
+			}
+		}
+		h.groupTree.ExpandGroupWithParents(groupPath)
+	}
+	restoreFolds := func() {
+		for path, expanded := range prevExpanded {
+			if !expanded {
+				h.groupTree.CollapseGroup(path)
+			}
+		}
+	}
+
+	h.rebuildFlatItems()
+	if find() {
+		return true
+	}
+	if h.statusFilter == "" && h.timeFilter == session.TimeFilterAll {
+		restoreFolds()
+		h.rebuildFlatItems()
+		return false
+	}
+	prevFilter, prevTime := h.statusFilter, h.timeFilter
+	h.statusFilter = ""
+	h.timeFilter = session.TimeFilterAll
+	h.rebuildFlatItems()
+	if find() {
+		return true
+	}
+	h.statusFilter, h.timeFilter = prevFilter, prevTime
+	restoreFolds()
+	h.rebuildFlatItems()
+	return false
 }
 
 // handleGlobalSearchKey handles keys when global search is visible
@@ -12272,6 +12425,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "/":
 		// The quick local title filter; Tab from it reaches Recall, and G
 		// opens Recall directly.
+		h.search.SetScopedGroup("")
+		h.search.SetItems(h.instances)
 		h.search.Show()
 		return h, nil
 
@@ -14121,10 +14276,12 @@ func deliverToConductorPaneAttributed(p conductorPane, msg string, ownPasteMarke
 		content := tmux.StripANSI(raw)
 
 		switch {
-		case send.HasUnsentComposerPrompt(content, msg):
+		case send.ComposerHoldsUnsentMessage(raw, msg, tmux.StripANSI):
 			// Introspectable composer still holds the message: the trailing
 			// Enter was swallowed, so re-press it. Surface a tmux rejection
-			// immediately rather than letting it masquerade as a timeout.
+			// immediately rather than letting it masquerade as a timeout. A
+			// prompt suggestion that echoes msg is not our stuck message: it
+			// falls through to the "composer rendered" arm, never an Enter.
 			sawUnsent = true
 			if err := p.SendEnter(); err != nil {
 				return fmt.Errorf("retry enter: %w", err)
@@ -16317,7 +16474,7 @@ func defaultForkWithStateWorktreeDeps(sparseSourceDir string) forkWithStateWorkt
 // rollback steps of forkSessionCmdWithOptions so the three rollback paths are
 // behaviorally testable (review finding G1).
 type forkInstanceDeps struct {
-	createInstance     func(source *session.Instance, title, groupPath string, opts *session.ClaudeOptions) (*session.Instance, error)
+	createInstance     func(source *session.Instance, title, groupPath string, opts *session.ClaudeOptions, parent session.ForkParent) (*session.Instance, error)
 	createMultiRepoDir func(inst, source *session.Instance) error
 	startInstance      func(inst *session.Instance) error
 	rollback           func(repoRoot, worktreePath, branch string)
@@ -16325,8 +16482,8 @@ type forkInstanceDeps struct {
 
 func defaultForkInstanceDeps() forkInstanceDeps {
 	return forkInstanceDeps{
-		createInstance: func(source *session.Instance, title, groupPath string, opts *session.ClaudeOptions) (*session.Instance, error) {
-			inst, _, err := source.CreateForkedInstanceForTool(title, groupPath, opts)
+		createInstance: func(source *session.Instance, title, groupPath string, opts *session.ClaudeOptions, parent session.ForkParent) (*session.Instance, error) {
+			inst, _, err := source.CreateForkedInstanceForToolUnder(title, groupPath, opts, parent)
 			return inst, err
 		},
 		createMultiRepoDir: func(inst, source *session.Instance) error {
@@ -16407,7 +16564,11 @@ func completeFork(
 	withStateWorktreeCreated bool,
 	deps forkInstanceDeps,
 ) (*session.Instance, error) {
-	inst, err := deps.createInstance(source, title, groupPath, opts)
+	// The parent goes into the fork's construction, not onto the finished
+	// instance: a Claude fork's first start runs the command baked here, and
+	// its launch env depends on the parent.
+	parent := session.ForkParent{SessionID: parentSessionID, ProjectPath: parentProjectPath}
+	inst, err := deps.createInstance(source, title, groupPath, opts, parent)
 	if err != nil {
 		if withStateWorktreeCreated {
 			deps.rollback(opts.WorktreeRepoRoot, opts.WorktreePath, opts.WorktreeBranch)
@@ -16428,10 +16589,6 @@ func completeFork(
 			deps.rollback(opts.WorktreeRepoRoot, opts.WorktreePath, opts.WorktreeBranch)
 		}
 		return nil, err
-	}
-
-	if parentSessionID != "" {
-		inst.SetParentWithPath(parentSessionID, parentProjectPath)
 	}
 
 	if err := deps.startInstance(inst); err != nil {
@@ -25830,6 +25987,16 @@ func (h *Home) matchesStatusFilter(filter, status session.Status) bool {
 			!(h.activeFilterHideStopped && statusBucket(status) == session.StatusStopped)
 	}
 	return statusBucket(status) == filter
+}
+
+// remoteMatchesStatus applies the status-filter predicate to a remote row
+// (#2627). RemoteSessionInfo.Status is the wire string; converting it to
+// session.Status puts remote rows through the same statusBucket mapping the
+// local predicate uses. Old remotes omit substate/archived, and the wire
+// Status for those still decodes to a valid bucket — the row keeps the
+// coarse behavior its glyph already shows, as the issue requires.
+func (h *Home) remoteMatchesStatus(filter session.Status, remote session.RemoteSessionInfo) bool {
+	return h.matchesStatusFilter(filter, session.Status(remote.Status))
 }
 
 // renderFilterBarHint returns the filter bar's keyboard-shortcut hint as

@@ -481,6 +481,13 @@ type Instance struct {
 	// `session set <id> context-level <none|primer|full>` (empty clears).
 	ContextLevel string `json:"context_level,omitempty"`
 
+	// PromptSuggestions is the per-session override for Claude Code prompt
+	// suggestions: "children-off", "on" or "off"; empty means unset (profile,
+	// then [launch] config, then children-off). See prompt_suggestions.go.
+	// CLI: `session set <id> prompt-suggestions <children-off|on|off>` (empty
+	// clears).
+	PromptSuggestions string `json:"prompt_suggestions,omitempty"`
+
 	// PluginChannelLinkDisabled opts the session out of the catalog-driven
 	// auto-link between Plugins and Channels (RFC §4.7). When true, an
 	// `--plugin foo` whose catalog entry has EmitsChannel=true does NOT
@@ -1644,6 +1651,7 @@ func (i *Instance) buildBashExportPrefix(skipConfigDirForCustomCommand bool) str
 		prefix += fmt.Sprintf("export CLAUDE_SECURESTORAGE_CONFIG_DIR=%s; ", i.configDirShellExpr(GetClaudeConfigDirForInstance(i)))
 	}
 	prefix += i.buildResolvedAccountHintExports()
+	prefix += i.promptSuggestionExport()
 	return prefix
 }
 
@@ -3540,7 +3548,17 @@ const codexWalkDirTimeout = 5 * time.Second
 //  1. Prefer sessions whose JSONL metadata matches this instance's project path.
 //  2. Optionally allow unscoped fallback (no cwd metadata) for initial bootstrap.
 func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped bool) string {
-	sessionsDir := filepath.Join(i.getCodexHomeDir(), "sessions")
+	return queryCodexSessionWith(i.getCodexHomeDir(), i.ProjectPath, i.CodexStartedAt, i.ID, excludeIDs, allowUnscoped)
+}
+
+// codexWalkDir walks $CODEX_HOME/sessions during bootstrap discovery. Test seam.
+var codexWalkDir = filepath.WalkDir
+
+// queryCodexSessionWith is queryCodexSession over explicit inputs, so the
+// status pass can run the (up to codexWalkDirTimeout) walk without holding
+// i.mu, and a timed-out walk goroutine never reads Instance fields (#2674).
+func queryCodexSessionWith(codexHome, projectPath string, codexStartedAt int64, instanceID string, excludeIDs map[string]bool, allowUnscoped bool) string {
+	sessionsDir := filepath.Join(codexHome, "sessions")
 	if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
 		return ""
 	}
@@ -3552,11 +3570,11 @@ func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped b
 	var bestUnscopedID string
 	var bestUnscopedTime time.Time
 
-	normalizedProjectPath := normalizePath(i.ProjectPath)
+	normalizedProjectPath := normalizePath(projectPath)
 
 	var walkErr error
 	if !runWithTimeout(codexWalkDirTimeout, func() {
-		walkErr = filepath.WalkDir(sessionsDir, func(path string, d os.DirEntry, err error) error {
+		walkErr = codexWalkDir(sessionsDir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil // Skip errors
 			}
@@ -3580,7 +3598,7 @@ func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped b
 			// best user-sourced match instead of returning nothing when the
 			// most-recent match happens to be a subagent. See
 			// codex_subagent_gate.go.
-			if i.shouldRejectCodexSubagentRebind(sessionID) {
+			if CodexSubagentThread(sessionID, codexHome) {
 				return nil
 			}
 
@@ -3590,8 +3608,8 @@ func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped b
 			}
 
 			// Only consider sessions created after we started this instance.
-			if i.CodexStartedAt > 0 {
-				startTime := time.UnixMilli(i.CodexStartedAt)
+			if codexStartedAt > 0 {
+				startTime := time.UnixMilli(codexStartedAt)
 				if info.ModTime().Before(startTime) {
 					return nil
 				}
@@ -3622,7 +3640,7 @@ func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped b
 		// best* variables since they may be partially populated; the caller
 		// retries with backoff so a transient stall self-heals.
 		sessionLog.Warn("codex_walkdir_timeout",
-			slog.String("instance_id", i.ID),
+			slog.String("instance_id", instanceID),
 			slog.String("sessions_dir", sessionsDir),
 			slog.Duration("timeout", codexWalkDirTimeout))
 		return ""
@@ -4381,6 +4399,10 @@ func (i *Instance) updateCodexSessionForPass(excludeIDs map[string]bool, forcePr
 		return missingProbeDep
 	}
 
+	if statusLocked {
+		return i.bootstrapCodexSessionStatusLocked(excludeIDs, pass, allowUnscoped, envSessionID, missingProbeDep)
+	}
+
 	// Fetch peer ownership before taking the bootstrap selection lock. Status
 	// readers and authoritative hook updates must remain available during I/O.
 	if excludeIDs == nil {
@@ -4388,26 +4410,10 @@ func (i *Instance) updateCodexSessionForPass(excludeIDs map[string]bool, forcePr
 			pass = &StatusUpdatePass{}
 		}
 		socket := tmux.DefaultSocketName()
-		ts := i.tmuxSession
-		started := i.lastStartTime
-		hookID := i.hookSessionID
-		if ts != nil {
-			socket = ts.SocketName
-		}
-		if statusLocked {
-			i.mu.Unlock()
+		if i.tmuxSession != nil {
+			socket = i.tmuxSession.SocketName
 		}
 		pass.codexOwnership(socket)
-		if statusLocked {
-			i.mu.Lock()
-			// A stop, restart, or authoritative binding while unlocked supersedes
-			// this bootstrap attempt. Do not resurrect or overwrite it.
-			if i.tmuxSession != ts || i.lastStartTime != started || i.hookSessionID != hookID ||
-				i.CodexSessionID != "" || !IsCodexCompatible(i.Tool) ||
-				(i.Status != StatusRunning && i.Status != StatusWaiting) {
-				return missingProbeDep
-			}
-		}
 	}
 
 	// Serialize fallback selection with publication so peers sharing a project
@@ -4423,27 +4429,85 @@ func (i *Instance) updateCodexSessionForPass(excludeIDs map[string]bool, forcePr
 	}
 
 	if sessionID := i.queryCodexSession(excludeIDs, allowUnscoped); sessionID != "" {
-		// queryCodexSession already filters subagent rollouts out of candidacy
-		// (incident 2026-07-15), so sessionID here is always a user thread.
-		changed := sessionID != i.CodexSessionID
-		if sessionID != i.CodexSessionID {
-			sessionLog.Debug(
-				"codex_session_update",
-				slog.String("old_id", i.CodexSessionID),
-				slog.String("new_id", sessionID),
-			)
-		}
-		i.CodexSessionID = sessionID
-		i.CodexDetectedAt = time.Now()
-		i.recordCodexOwnership(i.CodexSessionID)
-
-		// Sync back to tmux environment for future restarts
-		// Skip redundant writes when env already matches: each write is a tmux subprocess.
-		if i.tmuxSession != nil && i.tmuxSession.Exists() && (changed || envSessionID == "") {
-			_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", i.CodexSessionID)
-		}
+		i.publishCodexBootstrapSession(sessionID, envSessionID)
 	}
 	return missingProbeDep
+}
+
+// bootstrapCodexSessionStatusLocked runs the bootstrap disk scan for the
+// status pass. It is entered and returns with i.mu held, but releases i.mu
+// around the ownership refresh and the $CODEX_HOME walk: holding it there
+// stalled every render-path reader for up to codexWalkDirTimeout (#2674).
+// Lock order is codexBootstrapMu before i.mu.
+func (i *Instance) bootstrapCodexSessionStatusLocked(excludeIDs map[string]bool, pass *StatusUpdatePass, allowUnscoped bool, envSessionID, missingProbeDep string) string {
+	if pass == nil {
+		pass = &StatusUpdatePass{}
+	}
+	socket := tmux.DefaultSocketName()
+	ts := i.tmuxSession
+	started := i.lastStartTime
+	hookID := i.hookSessionID
+	if ts != nil {
+		socket = ts.SocketName
+	}
+	// A stop, restart, or authoritative binding while unlocked supersedes
+	// this bootstrap attempt. Do not resurrect or overwrite it.
+	superseded := func() bool {
+		return i.tmuxSession != ts || i.lastStartTime != started || i.hookSessionID != hookID ||
+			i.CodexSessionID != "" || !IsCodexCompatible(i.Tool) ||
+			(i.Status != StatusRunning && i.Status != StatusWaiting)
+	}
+
+	i.mu.Unlock()
+	if excludeIDs == nil {
+		pass.codexOwnership(socket)
+	}
+	codexBootstrapMu.Lock()
+	defer codexBootstrapMu.Unlock() // runs after return, with i.mu re-held
+	i.mu.Lock()
+	if superseded() {
+		return missingProbeDep
+	}
+	if excludeIDs == nil {
+		excludeIDs = i.codexExclusions(pass) // ownership is warm in pass
+		if excludeIDs == nil {
+			return missingProbeDep // Unknown ownership must not become a guessed binding.
+		}
+	}
+	codexHome, projectPath, startedAt, id := i.getCodexHomeDir(), i.ProjectPath, i.CodexStartedAt, i.ID
+
+	i.mu.Unlock()
+	sessionID := queryCodexSessionWith(codexHome, projectPath, startedAt, id, excludeIDs, allowUnscoped)
+	i.mu.Lock()
+
+	if sessionID != "" && !superseded() {
+		i.publishCodexBootstrapSession(sessionID, envSessionID)
+	}
+	return missingProbeDep
+}
+
+// publishCodexBootstrapSession binds a disk-scan result. Callers hold
+// codexBootstrapMu and, when called from the status pass, i.mu.
+func (i *Instance) publishCodexBootstrapSession(sessionID, envSessionID string) {
+	// queryCodexSession already filters subagent rollouts out of candidacy
+	// (incident 2026-07-15), so sessionID here is always a user thread.
+	changed := sessionID != i.CodexSessionID
+	if changed {
+		sessionLog.Debug(
+			"codex_session_update",
+			slog.String("old_id", i.CodexSessionID),
+			slog.String("new_id", sessionID),
+		)
+	}
+	i.CodexSessionID = sessionID
+	i.CodexDetectedAt = time.Now()
+	i.recordCodexOwnership(i.CodexSessionID)
+
+	// Sync back to tmux environment for future restarts
+	// Skip redundant writes when env already matches: each write is a tmux subprocess.
+	if i.tmuxSession != nil && i.tmuxSession.Exists() && (changed || envSessionID == "") {
+		_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", i.CodexSessionID)
+	}
 }
 
 // buildGenericCommand builds commands for custom tools defined in [tools.*]
@@ -5990,10 +6054,11 @@ func (i *Instance) sendMessageWhenReady(message string) error {
 	// marker seen afterwards is OUR collapse and not a foreign paste parked
 	// there. A capture failure leaves it false, and the gate then withholds
 	// the nudge.
-	composerPasteFreeBeforeSend := false
-	if raw, captureErr := i.tmuxSession.CapturePaneFresh(); captureErr == nil {
-		composerPasteFreeBeforeSend = !send.ComposerHoldsPasteMarker(raw, tmux.StripANSI)
-	}
+	//
+	// The same capture tells whether the composer shows a Claude prompt
+	// suggestion. Typing replaces it; the Enter after typing is then gated
+	// on the composer holding our message rather than the suggestion.
+	composerPasteFreeBeforeSend, suggestionShownBeforeSend := send.ProbeComposerBeforeSend(i.tmuxSession.CapturePaneFresh, UsesClaudeDeliveryVerify(i.Tool))
 
 	// Issue #2079: a large or slow-mounting composer can swallow the leading
 	// bytes of a paste, submitting a truncated tail that the agent answers as
@@ -6011,12 +6076,15 @@ func (i *Instance) sendMessageWhenReady(message string) error {
 	// shows "+5 lines"), not a line count and not the rows the pane wraps it
 	// to; comparing it with anything else refuses intact prompts (the rc.3
 	// launch regression). send.CheckPasteMarker owns that comparison.
-	var sendErr error
-	if expectedBreaks := send.ExpectedPasteMarkerLineBreaks(message); expectedBreaks > 0 && UsesClaudeDeliveryVerify(i.Tool) {
-		sendErr = i.tmuxSession.SendKeysAndEnterChecked(message, i.tmuxSession.CapturePaneFresh, send.PasteTruncationCheck(expectedBreaks))
-	} else {
-		sendErr = i.tmuxSession.SendKeysAndEnter(message)
+	//
+	// A deferred submit (the composer still painted the suggestion after
+	// typing) keeps the paste truncation check: send.TypeAndSubmit runs it on
+	// the frame it submits.
+	expectedBreaks := 0
+	if UsesClaudeDeliveryVerify(i.Tool) {
+		expectedBreaks = send.ExpectedPasteMarkerLineBreaks(message)
 	}
+	sendErr := send.TypeAndSubmit(i.tmuxSession, message, expectedBreaks, suggestionShownBeforeSend)
 	if sendErr != nil {
 		return fmt.Errorf("failed to send message: %w", sendErr)
 	}
@@ -6057,8 +6125,7 @@ func (i *Instance) sendMessageWhenReady(message string) error {
 		captured, captureErr := i.tmuxSession.CapturePaneFresh()
 		paneNow := send.CaptureOutcome(captured, captureErr)
 		if paneNow.OK {
-			content := tmux.StripANSI(captured)
-			unsentPromptDetected = send.ComposerHoldsPasteMarker(captured, tmux.StripANSI) || send.HasUnsentComposerPrompt(content, message)
+			unsentPromptDetected = send.ComposerHoldsPasteMarker(captured, tmux.StripANSI) || send.ComposerHoldsUnsentMessage(captured, message, tmux.StripANSI)
 		}
 		verifiedStatus, statusErr := i.tmuxSession.GetStatus()
 
@@ -11523,6 +11590,27 @@ func (i *Instance) CreateForkedInstanceWithOptions(
 	newTitle, newGroupPath string,
 	opts *ClaudeOptions,
 ) (*Instance, string, error) {
+	return i.createForkedClaudeInstance(newTitle, newGroupPath, opts, ForkParent{})
+}
+
+// ForkParent names the session a fork is nested under. The zero value is a
+// root fork.
+type ForkParent struct {
+	SessionID   string
+	ProjectPath string
+}
+
+func (p ForkParent) applyTo(inst *Instance) {
+	if p.SessionID != "" {
+		inst.SetParentWithPath(p.SessionID, p.ProjectPath)
+	}
+}
+
+func (i *Instance) createForkedClaudeInstance(
+	newTitle, newGroupPath string,
+	opts *ClaudeOptions,
+	parent ForkParent,
+) (*Instance, string, error) {
 	// Create new instance - use worktree path if provided, otherwise parent's project path
 	projectPath := i.ProjectPath
 	if opts != nil && opts.WorkDir != "" {
@@ -11552,6 +11640,11 @@ func (i *Instance) CreateForkedInstanceWithOptions(
 	if len(i.ExtraArgs) > 0 {
 		forked.ExtraArgs = append([]string(nil), i.ExtraArgs...)
 	}
+
+	// The parent is set before the one-shot command is baked: the launch env
+	// depends on it (a parented Claude session starts with prompt
+	// suggestions off), and Start() runs the baked command verbatim.
+	parent.applyTo(forked)
 
 	cmd, err := i.buildClaudeForkCommandForTarget(forked, opts)
 	if err != nil {
@@ -11585,6 +11678,19 @@ func (i *Instance) CreateForkedInstanceWithOptions(
 // tool-specific fork implementation. opts is the shared fork carrier for
 // worktree fields; non-Claude tool options continue to come from global config.
 func (i *Instance) CreateForkedInstanceForTool(newTitle, newGroupPath string, opts *ClaudeOptions) (*Instance, string, error) {
+	return i.CreateForkedInstanceForToolUnder(newTitle, newGroupPath, opts, ForkParent{})
+}
+
+// CreateForkedInstanceForToolUnder is CreateForkedInstanceForTool for a fork
+// nested under parent. A Claude fork gets the parent before its one-shot
+// command is built, so its first start already carries the parented launch
+// env; the other tools' fork commands do not depend on the parent.
+func (i *Instance) CreateForkedInstanceForToolUnder(newTitle, newGroupPath string, opts *ClaudeOptions, parent ForkParent) (*Instance, string, error) {
+	var (
+		forked *Instance
+		cmd    string
+		err    error
+	)
 	switch {
 	case i.Tool == "opencode":
 		workDir := i.ProjectPath
@@ -11595,16 +11701,20 @@ func (i *Instance) CreateForkedInstanceForTool(newTitle, newGroupPath string, op
 			repoRoot = opts.WorktreeRepoRoot
 			branch = opts.WorktreeBranch
 		}
-		return i.CreateForkedOpenCodeInstanceWithOptionsAndWorkDir(newTitle, newGroupPath, nil, workDir, repoRoot, branch)
+		forked, cmd, err = i.CreateForkedOpenCodeInstanceWithOptionsAndWorkDir(newTitle, newGroupPath, nil, workDir, repoRoot, branch)
 	case i.Tool == "pi":
-		return i.CreateForkedPiInstanceWithOptions(newTitle, newGroupPath, opts)
+		forked, cmd, err = i.CreateForkedPiInstanceWithOptions(newTitle, newGroupPath, opts)
 	case i.Tool == "omp":
-		return i.CreateForkedOMPInstanceWithOptions(newTitle, newGroupPath, opts)
+		forked, cmd, err = i.CreateForkedOMPInstanceWithOptions(newTitle, newGroupPath, opts)
 	case IsCodexCompatible(i.Tool):
-		return i.CreateForkedCodexInstanceWithOptions(newTitle, newGroupPath, opts)
+		forked, cmd, err = i.CreateForkedCodexInstanceWithOptions(newTitle, newGroupPath, opts)
 	default:
-		return i.CreateForkedInstanceWithOptions(newTitle, newGroupPath, opts)
+		return i.createForkedClaudeInstance(newTitle, newGroupPath, opts, parent)
 	}
+	if err == nil {
+		parent.applyTo(forked)
+	}
+	return forked, cmd, err
 }
 
 // ForkOpenCode returns the command to create a forked OpenCode session.

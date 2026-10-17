@@ -590,11 +590,14 @@ func handleSessionArchive(profile string, args []string) {
 	jsonOutput := fs.Bool("json", false, "Output as JSON")
 	quiet := fs.Bool("quiet", false, "Minimal output")
 	quietShort := fs.Bool("q", false, "Minimal output (short)")
+	expectedVersion := fs.String("expected-content-version", "", "Archive only a waiting child with this exact transcript version (requires --expected-parent)")
+	expectedParent := fs.String("expected-parent", "", "Archive only if the session has this parent (requires --expected-content-version)")
 
 	fs.Usage = func() {
 		fmt.Println("Usage: agent-deck session archive <id|title> [options]")
 		fmt.Println()
 		fmt.Println("Stop a session and hide it from active lists (retained in storage).")
+		fmt.Println("For conditional archival, provide both --expected-parent and --expected-content-version.")
 		fmt.Println()
 		fmt.Println("Options:")
 		fs.PrintDefaults()
@@ -639,6 +642,37 @@ func handleSessionArchive(profile string, args []string) {
 		out.Error(fmt.Sprintf("session '%s' is already archived", inst.Title), ErrCodeInvalidOperation)
 		exitCLI(1)
 	}
+	if conditionalArchiveRequested(fs) {
+		adoptLiveCodexIdentity(storage, inst)
+		lockedCodexID := inst.CodexSessionID
+		if session.IsCodexCompatible(inst.Tool) {
+			lock, err := session.AcquireCodexAcceptanceLock(lockedCodexID, codexAcceptanceLockTimeout)
+			if err != nil {
+				out.Error(fmt.Sprintf("cannot lock archive guard: %v", err), ErrCodeInvalidOperation)
+				exitCLI(1)
+			}
+			defer lock.Release()
+		} else if session.IsClaudeCompatible(inst.Tool) {
+			lock, err := session.AcquireSendLock(inst.ID, session.SendTargetLockWait)
+			if err != nil {
+				out.Error(fmt.Sprintf("cannot lock archive guard: %v", err), ErrCodeInvalidOperation)
+				exitCLI(1)
+			}
+			defer lock.Release()
+		}
+		if err := inst.UpdateStatus(); err != nil {
+			out.Error(fmt.Sprintf("cannot refresh archive guard: %v", err), ErrCodeInvalidOperation)
+			exitCLI(1)
+		}
+		if session.IsCodexCompatible(inst.Tool) && inst.CodexSessionID != lockedCodexID {
+			out.Error("conditional archive refused: Codex identity changed while locked", ErrCodeInvalidOperation)
+			exitCLI(1)
+		}
+		if err := validateConditionalArchive(inst, instances, *expectedParent, *expectedVersion); err != nil {
+			out.Error(err.Error(), ErrCodeInvalidOperation)
+			exitCLI(1)
+		}
+	}
 
 	// Only kill a live tmux session. Killing an already-dead session returns a
 	// fatal error that would abort the archive (see idempotent-Kill history),
@@ -677,6 +711,57 @@ func handleSessionArchive(profile string, args []string) {
 		"title":    inst.Title,
 		"archived": true,
 	})
+}
+
+// conditionalArchiveRequested reports whether either guard flag was passed,
+// even with an empty value. An explicitly empty guard (for example an unset
+// shell variable) must reach validateConditionalArchive and be refused rather
+// than silently falling back to an unconditional archive.
+func conditionalArchiveRequested(fs *flag.FlagSet) bool {
+	requested := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "expected-content-version" || f.Name == "expected-parent" {
+			requested = true
+		}
+	})
+	return requested
+}
+
+func validateConditionalArchive(inst *session.Instance, peers []*session.Instance, parent, version string) error {
+	if parent == "" || version == "" || inst.ParentSessionID != parent {
+		return fmt.Errorf("conditional archive requires matching parent and transcript version")
+	}
+	if !session.IsCodexCompatible(inst.Tool) && !session.IsClaudeCompatible(inst.Tool) {
+		return fmt.Errorf("conditional archive supports only Codex and Claude terminal-turn fences")
+	}
+	if inst.Status != session.StatusWaiting {
+		return fmt.Errorf("conditional archive requires a waiting terminal worker")
+	}
+	currentVersion := inst.ResponseContentVersion(peers)
+	if currentVersion == "" || currentVersion != version {
+		return fmt.Errorf("conditional archive refused: transcript changed or exact version unavailable")
+	}
+	if session.IsCodexCompatible(inst.Tool) {
+		response, versioned, err := inst.GetLastResponseAtVersion(peers, currentVersion)
+		latestTurn, turnErr := inst.LatestCodexTurnGeneration()
+		if err != nil || turnErr != nil || !versioned || latestTurn == "" ||
+			response.CodexTurnGeneration != latestTurn {
+			return fmt.Errorf("conditional archive refused: latest Codex turn is not the completed response")
+		}
+		if _, err := session.ReconcileCodexSubmissionMarker(inst.ID, inst.CodexSessionID, latestTurn); err != nil {
+			return fmt.Errorf("conditional archive refused: %w", err)
+		}
+	} else if session.IsClaudeCompatible(inst.Tool) {
+		path, err := inst.GetJSONLPathChecked(peers)
+		if err != nil {
+			return fmt.Errorf("conditional archive refused: cannot resolve exact Claude transcript: %w", err)
+		}
+		_, found, pending := session.ScanTranscriptTailForDone(path)
+		if !found || pending {
+			return fmt.Errorf("conditional archive refused: latest Claude turn has no flushed terminal report")
+		}
+	}
+	return nil
 }
 
 // handleSessionUnarchive clears the archive flag without restarting tmux.
@@ -2247,6 +2332,7 @@ func handleSessionSet(profile string, args []string) {
 		fmt.Println("  account            Named account slot (#924) — resolves via [profiles.<account>.claude].config_dir; restart required")
 		fmt.Println("  idle-timeout       Auto-stop after no tmux output for this duration (#1143; Go duration: 30m, 1h, 24h; 0 disables)")
 		fmt.Println("  context-level      Harness context-level override: none, primer, or full (#2260; empty clears; global < group < session; see `session primer`); restart required")
+		fmt.Println("  prompt-suggestions Claude prompt suggestions: children-off (off when the session has a parent), on, or off (empty clears; session > profile > [launch]); restart required")
 		fmt.Println("  order              0-based position in the group (see `session show --json` .order); clamps to the end")
 		fmt.Println()
 		fmt.Println("Options:")
@@ -3100,7 +3186,7 @@ func handleSessionSend(profile string, args []string) {
 	jsonOutput := fs.Bool("json", false, "Output as JSON")
 	quiet := fs.Bool("q", false, "Quiet mode: nothing on a confirmed delivery; one stderr line when delivery is unconfirmed or queued; errors as usual")
 	noWait := fs.Bool("no-wait", false, "Don't wait for agent to be ready (send immediately)")
-	wait := fs.Bool("wait", false, "Block until agent finishes processing, then print output (on a socket send, first waits up to 30s for the turn to start; returns immediately with wait_outcome=unverified_busy_target/unverified_busy_probe_failed if the target could not be shown idle)")
+	wait := fs.Bool("wait", false, "Block until agent finishes processing, then print output (Claude socket waits share --timeout between observing a fresh turn and its completed reply; returns immediately with wait_outcome=unverified_busy_target/unverified_busy_probe_failed if the target could not be shown idle)")
 	stream := fs.Bool("stream", false, "Stream JSONL events (Claude only) to stdout instead of returning a snapshot")
 	draft := fs.Bool("draft", false, "Pre-fill the prompt without submitting (incompatible with --wait/--stream/--no-wait)")
 	messageFile := fs.String("message-file", "", "Read the message from a file ('-' for stdin) instead of a positional argument; avoids shell quoting of long prompts")
@@ -3739,6 +3825,17 @@ func handleSessionSend(profile string, args []string) {
 	// what is left, never a fresh copy (PR #2043 round 2).
 	waitDeadline := time.Now().Add(*timeout)
 
+	if skippedOutcome != "" {
+		// Refuse attribution before waiting for any transcript path or turn.
+		// JSON --wait suppressed the eager ack, so emit its single result here.
+		fmt.Fprintln(os.Stderr, sendSkippedWaitWarning(inst.Title, skippedOutcome))
+		if *jsonOutput {
+			out.Success(fmt.Sprintf("Wrote message to '%s' inbox (unacknowledged)", inst.Title), sendData)
+		}
+		recordSendEventOnce()
+		return
+	}
+
 	// #2043: delivery acknowledgement is not reply identity. A message sent to
 	// a busy target is queued behind the live turn and only becomes a user
 	// record when its own turn starts, so --wait and --stream bind to that
@@ -3785,27 +3882,21 @@ func handleSessionSend(profile string, args []string) {
 	}
 
 	// --wait: block until the agent finishes processing, then print output.
-	// #2089: on the socket transport, waitAfterSend additionally requires the
-	// target to actually start a turn before treating it as complete, so a
-	// message the target's inbound controls held or dropped never reads back
-	// as a stale success.
-	if skippedOutcome != "" {
-		// No completion wait, no session-ID refresh, no output: see the
-		// skippedOutcome comment above. The stderr line is the only
-		// signal for a non-JSON caller, which would otherwise see --wait
-		// return instantly with nothing.
-		fmt.Fprintln(os.Stderr, sendSkippedWaitWarning(inst.Title, skippedOutcome))
-		recordSendEventOnce()
-		return
-	}
+	// Socket waits observe a new durable turn rather than correlate a prompt:
+	// Claude wraps peer messages, and its inbox never acknowledges acceptance.
+	// A dropped message with no new turn must not read back stale output.
 	var finalStatus string
 	var response *session.ResponseOutput
 	var responseErr error
 	if useTurnIdentity {
 		var identityErr, completionErr error
-		response, finalStatus, identityErr, completionErr, responseErr = awaitClaudeWaitReply(turnQuery, waitDeadline, func(remaining time.Duration) (string, error) {
-			return waitAfterSend(tmuxSess, sendRes.transport, remaining)
-		})
+		if sendRes.transport == "socket" {
+			response, finalStatus, identityErr, completionErr, responseErr = awaitClaudeObservedReply(turnQuery, waitDeadline)
+		} else {
+			response, finalStatus, identityErr, completionErr, responseErr = awaitClaudeWaitReply(turnQuery, waitDeadline, func(remaining time.Duration) (string, error) {
+				return waitAfterSend(tmuxSess, sendRes.transport, remaining)
+			})
+		}
 		if identityErr != nil {
 			out.Error(fmt.Sprintf("turn identity not established: %v", identityErr), ErrCodeInvalidOperation)
 			recordSendEventOnce()
@@ -3816,7 +3907,7 @@ func handleSessionSend(profile string, args []string) {
 			recordSendEventOnce()
 			exitCLI(1)
 		}
-		if errors.Is(responseErr, session.ErrTurnResponseIncomplete) && response != nil {
+		if sendRes.transport != "socket" && errors.Is(responseErr, session.ErrTurnResponseIncomplete) && response != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %v — response may be incomplete\n", responseErr)
 			responseErr = nil
 		}
@@ -3943,7 +4034,7 @@ func handleSessionSend(profile string, args []string) {
 }
 
 // awaitClaudeWaitReply is the whole Claude --wait reply path after delivery,
-// and the only place handleSessionSend obtains a Claude reply from: establish
+// for exact-prompt sends: establish
 // the turn identity (blocking until the message's own user record exists —
 // a message queued behind a live turn waits here for its turn to start),
 // observe completion (the UI prompt reappearing), then read THIS turn's
@@ -3959,7 +4050,23 @@ func handleSessionSend(profile string, args []string) {
 // message was queued can never be returned: the read starts after the
 // message's own user record and stops at the next human prompt.
 func awaitClaudeWaitReply(q session.TurnQuery, deadline time.Time, completion func(remaining time.Duration) (string, error)) (resp *session.ResponseOutput, finalStatus string, identityErr, completionErr, responseErr error) {
-	turnID, identityErr := session.AwaitTurnIdentity(q, time.Until(deadline), 100*time.Millisecond)
+	return awaitClaudeReply(q, deadline, session.AwaitTurnIdentity, completion)
+}
+
+// awaitClaudeObservedReply waits for the selected transcript turn's end record,
+// not pane-global status, which may already describe a later unrelated turn.
+// Observation and reply polling share one deadline without a completion grace.
+func awaitClaudeObservedReply(q session.TurnQuery, deadline time.Time) (resp *session.ResponseOutput, finalStatus string, identityErr, completionErr, responseErr error) {
+	turnID, identityErr := session.AwaitObservedTurn(q, time.Until(deadline), 100*time.Millisecond)
+	if identityErr != nil {
+		return nil, "", identityErr, nil, nil
+	}
+	resp, responseErr = session.AwaitTurnResponse(turnID, time.Until(deadline), 100*time.Millisecond)
+	return resp, "waiting", nil, nil, responseErr
+}
+
+func awaitClaudeReply(q session.TurnQuery, deadline time.Time, turn func(session.TurnQuery, time.Duration, time.Duration) (session.TurnIdentity, error), completion func(remaining time.Duration) (string, error)) (resp *session.ResponseOutput, finalStatus string, identityErr, completionErr, responseErr error) {
+	turnID, identityErr := turn(q, time.Until(deadline), 100*time.Millisecond)
 	if identityErr != nil {
 		return nil, "", identityErr, nil, nil
 	}
@@ -4919,6 +5026,7 @@ func executeSend(target sendRetryTarget, tool, message string, noWait bool, tun 
 			// during verification is the collapsed form of our own payload
 			// and may be nudged.
 			tun.retry.composerPasteFreeBeforeSend = guard.ComposerPasteMarkerFree
+			tun.retry.suggestionShownBeforeSend = guard.SuggestionShown
 		}
 	}
 
@@ -5102,6 +5210,10 @@ type sendRetryOptions struct {
 	// the fail-safe default for callers that cannot establish provenance.
 	composerPasteFreeBeforeSend bool
 
+	// suggestionShownBeforeSend mirrors send.ComposerGuardResult.SuggestionShown
+	// for the initial submit (send.TypeAndSubmit).
+	suggestionShownBeforeSend bool
+
 	// targetBusyByHook, when non-nil, reports the target's hook-driven busy
 	// state (the #1578 `--defer-if-busy` signal) as (busy, known), read fresh
 	// from the hook file on every call. It is sampled once before the send
@@ -5150,33 +5262,10 @@ func (o sendRetryOptions) hookBusyNow() bool {
 	return known && busy
 }
 
-// composerPasteFree captures the pane and reports whether the composer is
-// currently free of a "[Pasted text …]" marker — the pre-send provenance
-// probe for sendRetryOptions.composerPasteFreeBeforeSend (issue #1777). A
-// capture failure returns false (fail safe: no evidence, no attribution).
-func composerPasteFree(target sendRetryTarget) bool {
-	raw, err := target.CapturePaneFresh()
-	if err != nil {
-		return false
-	}
-	return !send.ComposerHoldsPasteMarker(raw, tmux.StripANSI)
-}
-
-// sendInitialKeysChecked sends message and presses Enter, routing the submit
-// through send.PasteTruncationCheck when expectedBreaks > 0 so a paste cut
-// short in transit withholds Enter instead of submitting a fragment (issue
-// #2079). expectedBreaks == 0 (a single-line message, or a non-Claude target
-// that never populates sendRetryOptions.expectedPasteBreaks) sends
-// unchecked, identical to plain SendKeysAndEnter.
-//
-// This gives `session send` and its `--message-file` form the same guard
-// Instance.sendMessageWhenReady has always applied on the launch path
-// (#2148 item 4b); before this they had no truncation guard of their own.
-func sendInitialKeysChecked(target sendRetryTarget, message string, expectedBreaks int) error {
-	if expectedBreaks <= 0 {
-		return target.SendKeysAndEnter(message)
-	}
-	return target.SendKeysAndEnterChecked(message, target.CapturePaneFresh, send.PasteTruncationCheck(expectedBreaks))
+// sendInitialKeysChecked is the initial submit of `session send`:
+// send.TypeAndSubmit, shared with the launch path (#2148 item 4b).
+func sendInitialKeysChecked(target sendRetryTarget, message string, expectedBreaks int, suggestionShown bool) error {
+	return send.TypeAndSubmit(target, message, expectedBreaks, suggestionShown)
 }
 
 // sendWithRetryTarget sends the message and runs the bounded submit
@@ -5220,7 +5309,7 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 	// is the target taking this message up (submitted).
 	hookBusyBeforeSend := opts.hookBusyNow()
 
-	if err := sendInitialKeysChecked(target, message, opts.expectedPasteBreaks); err != nil {
+	if err := sendInitialKeysChecked(target, message, opts.expectedPasteBreaks, opts.suggestionShownBeforeSend); err != nil {
 		if opts.promptGuard != nil && opts.promptGuard.refused {
 			return opts.promptGuard.refusal()
 		}
@@ -5327,7 +5416,7 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 		obs.Observe(paneNow)
 		if paneNow.OK {
 			content := tmux.StripANSI(captured)
-			unsentPromptDetected = send.ComposerHoldsPasteMarker(captured, tmux.StripANSI) || send.HasUnsentComposerPrompt(content, message)
+			unsentPromptDetected = send.ComposerHoldsPasteMarker(captured, tmux.StripANSI) || send.ComposerHoldsUnsentMessage(captured, message, tmux.StripANSI)
 			queueAcknowledged = claudeQueueAcknowledged(content)
 			if !sawDeliveryEvidence && deliveryToken != "" && strings.Contains(content, deliveryToken) {
 				sawDeliveryEvidence = true
