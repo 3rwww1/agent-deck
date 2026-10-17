@@ -2293,6 +2293,10 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 			}
 			// V2 uses the shared service instead of a per-TUI --port server.
 			i.setOpenCodePort(0)
+			if i.OpenCodeSessionID != "" && !i.openCodeV2HasSessionOptions() {
+				return envPrefix + fmt.Sprintf("%s -s %s%s",
+					i.attachOpenCodeToSharedService(cmd), i.OpenCodeSessionID, i.openCodeResumeDirArg())
+			}
 			return envPrefix + i.buildOpenCodeV2Command(cmd)
 		} else {
 			extraFlags = i.buildOpenCodeExtraFlags() + i.buildOpenCodeSSEPortFlag()
@@ -12263,9 +12267,9 @@ func openCodeModelRef(model string) (map[string]string, error) {
 	return ref, nil
 }
 
-// runOpenCodeServiceCall runs one `opencode api <operation>` request with the
-// resolved opencode binary against the 2.x shared service for sessionID and
-// returns its stdout. An empty body sends no request body.
+// runOpenCodeServiceCall sends one 2.x `opencode api <operation>` request for
+// sessionID, straight to the healthy shared service when the guard holds one,
+// and returns the response body. An empty body sends no request body.
 func runOpenCodeServiceCall(binary, workDir, operation, sessionID, body string) ([]byte, error) {
 	return runOpenCodeServiceCallContext(context.Background(), binary, workDir, operation, sessionID, body)
 }
@@ -12275,19 +12279,23 @@ func runOpenCodeServiceCallContext(ctx context.Context, binary, workDir, operati
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	if route, ok := openCodeServiceRoutes[operation]; ok {
+		path := fmt.Sprintf(route.path, url.PathEscape(sessionID))
+		if output, served, err := callOpenCodeService(ctx, binary, route.method, path, body); served {
+			return output, err
+		}
+	}
 	// #nosec G204 -- binary is the configured opencode resolved by
 	// openCodeLaunchBinary, operation is a constant at every call site,
 	// sessionID passed a shell-safe identifier check, and the JSON body is
 	// passed as a single argv element.
-	args := []string{"api", operation, "--param", "sessionID=" + sessionID}
+	args := []string{operation, "--param", "sessionID=" + sessionID}
 	if body != "" {
 		args = append(args, "-d", body)
 	}
-	inst := &Instance{Command: binary}
-	cmd, err := inst.openCodeCLICommand(ctx, workDir, args...)
-	if err != nil {
-		return nil, err
-	}
+	cmd := openCodeAPICommand(ctx, binary, args...)
+	cmd.Dir = workDir
+	cmd.WaitDelay = 500 * time.Millisecond
 	output, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError

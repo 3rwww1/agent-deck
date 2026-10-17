@@ -9479,6 +9479,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		go func(instances []*session.Instance) {
 			rev := session.NewReviver()
 			_ = rev.ReviveAll(instances)
+			session.ReopenLostOpenCodeRoutes(instances)
 		}(h.ownedOnly(append([]*session.Instance(nil), h.instances...)))
 		return h, h.reviverTick()
 
