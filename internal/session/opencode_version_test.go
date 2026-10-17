@@ -59,6 +59,8 @@ func isolateOpenCodeConfig(t *testing.T, command string) {
 	}
 	ClearUserConfigCache()
 	t.Cleanup(ClearUserConfigCache)
+	// No test reaches a real background service; a test that needs one installs its own guard.
+	useFreshOpenCodeServiceGuard(t).status = func(string) (openCodeService, error) { return openCodeService{}, errOpenCodeServiceDisabled }
 }
 
 // newOpenCodeResumeInstance is a resumed session carrying every flag that

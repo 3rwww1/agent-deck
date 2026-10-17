@@ -35,6 +35,7 @@ func TestQueryOpenCodeSession_V2BoundSessionMovedToOtherDirectory(t *testing.T) 
 	movedTo := t.TempDir()
 	emptyPage := `{"data":[],"cursor":{"previous":null,"next":null}}`
 	dir := setFakeOpenCodeSessionGet(t, emptyPage, movedSessionPayload("ses_BOUND", movedTo))
+	useFreshOpenCodeServiceGuard(t).status = func(string) (openCodeService, error) { return openCodeService{}, errOpenCodeServiceDisabled }
 
 	inst := &Instance{Tool: "opencode", ProjectPath: projectPath, OpenCodeSessionID: "ses_BOUND"}
 	if got := inst.queryOpenCodeSession(); got != "ses_BOUND" {
@@ -50,7 +51,7 @@ func TestQueryOpenCodeSession_V2BoundSessionMovedToOtherDirectory(t *testing.T) 
 	if err != nil {
 		t.Fatalf("read argv: %v", err)
 	}
-	if want := "api\nsession.get\n--param\nsessionID=ses_BOUND\n"; string(argv) != want {
+	if want := "api\nsession.get\n--param\nsessionID=ses_BOUND\n--standalone\n"; string(argv) != want {
 		t.Fatalf("opencode argv =\n%s\nwant\n%s", argv, want)
 	}
 }
