@@ -43,10 +43,10 @@ func TestOpenCodeForkV2_WorktreeForkMovesChildToWorkDir(t *testing.T) {
 		t.Fatalf("read argv marker: %v", err)
 	}
 	moveBody, _ := json.Marshal(map[string]string{"directory": workDir})
-	want := "api\nsession.fork\n--param\nsessionID=ses_parent_123\n-d\n{}\n" +
-		"api\nsession.move\n--param\nsessionID=ses_child_456\n-d\n" + string(moveBody) + "\n" +
-		"api\nsession.switchAgent\n--param\nsessionID=ses_child_456\n-d\n" + `{"agent":"build"}` + "\n" +
-		"api\nsession.update\n--param\nsessionID=ses_child_456\n-d\n" + `{"title":"oc fork"}` + "\n"
+	want := "api\nsession.fork\n--param\nsessionID=ses_parent_123\n-d\n{}\n--standalone\n" +
+		"api\nsession.move\n--param\nsessionID=ses_child_456\n-d\n" + string(moveBody) + "\n--standalone\n" +
+		"api\nsession.switchAgent\n--param\nsessionID=ses_child_456\n-d\n" + `{"agent":"build"}` + "\n--standalone\n" +
+		"api\nsession.update\n--param\nsessionID=ses_child_456\n-d\n" + `{"title":"oc fork"}` + "\n--standalone\n"
 	if string(gotArgv) != want {
 		t.Fatalf("opencode argv =\n%s\nwant\n%s", gotArgv, want)
 	}
@@ -77,7 +77,7 @@ func TestOpenCodeForkV2_WorktreeMoveFailureRemovesChild(t *testing.T) {
 	if !strings.Contains(string(gotArgv), "api\nsession.move\n") {
 		t.Fatalf("worktree fork never attempted session.move; opencode argv =\n%s", gotArgv)
 	}
-	if want := "api\nsession.remove\n--param\nsessionID=ses_child_456\n"; !strings.HasSuffix(string(gotArgv), want) {
+	if want := "api\nsession.remove\n--param\nsessionID=ses_child_456\n--standalone\n"; !strings.HasSuffix(string(gotArgv), want) {
 		t.Fatalf("a child that could not be moved must be removed; opencode argv =\n%s", gotArgv)
 	}
 }
