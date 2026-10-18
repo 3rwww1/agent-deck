@@ -9400,6 +9400,13 @@ func resolveClaudeTranscriptPath(configDir, projectPath, sessionID string, addit
 	if sessionID == "" {
 		return ""
 	}
+	// The ID becomes a file name and a glob pattern: a separator or ".." could
+	// name a file outside the projects tree and a glob metacharacter could
+	// match another session's transcript, so such an ID resolves to nothing.
+	fileName, err := conversationPathComponent(sessionID + ".jsonl")
+	if err != nil || strings.ContainsAny(sessionID, "*?[") {
+		return ""
+	}
 
 	projectsDir := filepath.Join(configDir, "projects")
 
@@ -9422,7 +9429,11 @@ func resolveClaudeTranscriptPath(configDir, projectPath, sessionID string, addit
 		if candidateDir == "" {
 			continue
 		}
-		candidate := filepath.Join(projectsDir, ConvertToClaudeDirName(candidateDir), sessionID+".jsonl")
+		projectDir, ok := claudeProjectDir(configDir, ConvertToClaudeDirName(candidateDir))
+		if !ok {
+			continue
+		}
+		candidate := filepath.Join(projectDir, fileName)
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate
 		}
@@ -12994,7 +13005,11 @@ func sessionConversationByteSize(inst *Instance, sessionID string) int64 {
 	if encodedPath == "" {
 		encodedPath = "-"
 	}
-	sessionFile := filepath.Join(configDir, "projects", encodedPath, sessionID+".jsonl")
+	fileName, err := conversationPathComponent(sessionID + ".jsonl")
+	if err != nil {
+		return 0
+	}
+	sessionFile := filepath.Join(configDir, "projects", encodedPath, fileName)
 	if info, err := os.Stat(sessionFile); err == nil {
 		return info.Size()
 	}
@@ -13039,7 +13054,11 @@ func sessionConversationMtime(inst *Instance, sessionID string) time.Time {
 	if encodedPath == "" {
 		encodedPath = "-"
 	}
-	sessionFile := filepath.Join(configDir, "projects", encodedPath, sessionID+".jsonl")
+	fileName, err := conversationPathComponent(sessionID + ".jsonl")
+	if err != nil {
+		return time.Time{}
+	}
+	sessionFile := filepath.Join(configDir, "projects", encodedPath, fileName)
 	if info, err := os.Stat(sessionFile); err == nil {
 		return info.ModTime()
 	}
@@ -13226,7 +13245,11 @@ func sessionHasConversationData(inst *Instance, sessionID string) bool {
 		encodedPath = "-"
 	}
 
-	sessionFile := filepath.Join(configDir, "projects", encodedPath, sessionID+".jsonl")
+	fileName, err := conversationPathComponent(sessionID + ".jsonl")
+	if err != nil {
+		return false
+	}
+	sessionFile := filepath.Join(configDir, "projects", encodedPath, fileName)
 
 	// Issue #662 diagnostic contract: emit a single structured "decision"
 	// log line per call with every field needed to reconstruct the false
