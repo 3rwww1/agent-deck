@@ -37,6 +37,8 @@ func groupVerbCanonical(verb string) (canonical string, ok bool) {
 		return "change", true
 	case "reorder", "sort":
 		return "reorder", true
+	case "duplicates", "dups":
+		return "duplicates", true
 	case "help", "--help", "-h":
 		return "help", true
 	}
@@ -84,6 +86,8 @@ func handleGroup(profile string, args []string) {
 		handleGroupChange(profile, args[1:])
 	case "reorder":
 		handleGroupReorder(profile, args[1:])
+	case "duplicates":
+		handleGroupDuplicates(profile, args[1:])
 	case "help":
 		printGroupHelp()
 	}
@@ -102,6 +106,7 @@ func printGroupHelp() {
 	fmt.Println("  move <id> <group> Move session to a different group")
 	fmt.Println("  change <group> [<dest>] Reparent a group (empty dest = move to root)")
 	fmt.Println("  reorder <name>    Reorder a group (--up, --down, --position N)")
+	fmt.Println("  duplicates        List titles held twice in one group (alias: dups)")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  agent-deck group list")
@@ -1079,6 +1084,10 @@ func handleGroupMove(profile string, args []string) {
 	groupTree.DefaultMaxConcurrent = cfg.GroupDefaults.MaxConcurrent
 
 	targetGroupPath := groupTree.ResolveMoveTargetGroup(targetGroup)
+	if err := session.CheckUniquePath(instances, inst, targetGroupPath, inst.Title); err != nil {
+		out.Error(err.Error(), ErrCodeAlreadyExists)
+		exitCLI(1)
+	}
 
 	// Move the session
 	groupTree.MoveSessionToGroup(inst, targetGroupPath)
@@ -1523,4 +1532,52 @@ func handleGroupMoveToProfile(sourceProfile, targetProfile, groupPath string, fo
 			"groups_created": result.CreatedGroups,
 		},
 	)
+}
+
+// handleGroupDuplicates lists every tree path (group + "/" + title) held by
+// more than one session and exits 1 when there is any. It renames nothing.
+func handleGroupDuplicates(profile string, args []string) {
+	fs := flag.NewFlagSet("group duplicates", flag.ContinueOnError)
+	jsonOutput := fs.Bool("json", false, "Output as JSON")
+	fs.Usage = func() {
+		fmt.Println("Usage: agent-deck group duplicates [--json]")
+		fmt.Println()
+		fmt.Println("List titles held by more than one session in the same group. Exits 1 when any exist.")
+	}
+	if err := parseCLIFlags(fs, normalizeArgs(fs, args)); err != nil {
+		exitCLI(1)
+	}
+	out := NewCLIOutput(*jsonOutput, false)
+	storage, err := session.NewStorageWithProfile(profile)
+	if err != nil {
+		out.Error(fmt.Sprintf("failed to initialize storage: %v", err), ErrCodeNotFound)
+		exitCLI(1)
+	}
+	instances, _, err := storage.LoadWithGroups()
+	if err != nil {
+		out.Error(fmt.Sprintf("failed to load sessions: %v", err), ErrCodeNotFound)
+		exitCLI(1)
+	}
+	dups := session.DuplicatePaths(instances)
+	type dupJSON struct {
+		Path       string   `json:"path"`
+		SessionIDs []string `json:"session_ids"`
+	}
+	data := make([]dupJSON, 0, len(dups))
+	var human strings.Builder
+	for _, d := range dups {
+		ids := make([]string, 0, len(d.Sessions))
+		for _, inst := range d.Sessions {
+			ids = append(ids, inst.ID)
+		}
+		data = append(data, dupJSON{Path: d.Path, SessionIDs: ids})
+		fmt.Fprintf(&human, "%s: %s\n", d.Path, strings.Join(ids, ", "))
+	}
+	if len(dups) == 0 {
+		human.WriteString("No duplicate paths.\n")
+	}
+	out.Print(strings.TrimSuffix(human.String(), "\n"), map[string]interface{}{"duplicates": data})
+	if len(dups) > 0 {
+		exitCLI(1)
+	}
 }
