@@ -17,8 +17,8 @@ func TestNativeSessionName(t *testing.T) {
 		name, body, group, want string
 	}{
 		{"off by default", "", "team", "lane"},
-		{"on", "native_name_from_path=true", "team", "team/lane"},
-		{"nested group", "native_name_from_path=true", "team/sub", "team/sub/lane"},
+		{"on", "native_name_from_path=true", "team", "team_lane"},
+		{"nested group", "native_name_from_path=true", "team/sub", "team_sub_lane"},
 		{"no group", "native_name_from_path=true", "", "lane"},
 		{"off", "native_name_from_path=false", "team", "lane"},
 	} {
@@ -45,7 +45,7 @@ func TestNativeSessionNameKeepsPushTitleOptOut(t *testing.T) {
 // The name agent-deck pushed must not come back as the deck title.
 func TestNativeSessionNameIsNotSyncedBack(t *testing.T) {
 	startupNameConfig(t, "native_name_from_path=true")
-	seedClaudeSession(t, os.Getenv("HOME"), "sid-path", "team/lane")
+	seedClaudeSession(t, os.Getenv("HOME"), "sid-path", "team_lane")
 	inst := &Instance{ID: "i1", Tool: "claude", Title: "lane", GroupPath: "team"}
 	if name, changed := inst.ResolveTitleFromClaude("sid-path"); changed {
 		t.Fatalf("ResolveTitleFromClaude = (%q,true), want no change", name)
@@ -104,8 +104,8 @@ func TestOpenCodeNativeNamePushedWhenSessionAppears(t *testing.T) {
 		t.Fatalf("patches = %q, want one", patches)
 	}
 	var got struct{ Title string }
-	if err := json.Unmarshal([]byte(patches[0]), &got); err != nil || got.Title != "team/lane" {
-		t.Fatalf("patch body = %s, want title team/lane", patches[0])
+	if err := json.Unmarshal([]byte(patches[0]), &got); err != nil || got.Title != "team_lane" {
+		t.Fatalf("patch body = %s, want title team_lane", patches[0])
 	}
 }
 
