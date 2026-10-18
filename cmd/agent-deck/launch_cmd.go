@@ -563,6 +563,10 @@ func handleLaunchCommand(profile string, args []string, inspectFlags func(*flag.
 	} else {
 		newInstance = session.NewInstance(sessionTitle, path)
 	}
+	if err := session.CheckUniquePath(instances, newInstance, newInstance.GroupPath, newInstance.Title); err != nil {
+		out.Error(err.Error(), ErrCodeAlreadyExists)
+		exitCLI(1)
+	}
 
 	// Socket-isolation CLI override (issue #687 phase 1, v1.7.50).
 	// Matches `agent-deck add --tmux-socket`. Whitespace-only flag falls
