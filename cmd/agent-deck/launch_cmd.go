@@ -564,6 +564,10 @@ func handleLaunchCommand(profile string, args []string, inspectFlags func(*flag.
 	} else {
 		newInstance = session.NewInstance(sessionTitle, path)
 	}
+	if err := session.CheckUniquePath(instances, newInstance, newInstance.GroupPath, newInstance.Title); err != nil {
+		out.Error(err.Error(), ErrCodeAlreadyExists)
+		exitCLI(1)
+	}
 
 	// An initial message is a send: an enforced cost budget refuses the
 	// launch before the session is saved or started (a worktree made for it

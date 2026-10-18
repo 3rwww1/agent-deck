@@ -2509,6 +2509,10 @@ func handleAddCommand(profile string, args []string, inspectFlags func(*flag.Fla
 	} else {
 		newInstance = session.NewInstance(sessionTitle, path)
 	}
+	if err := session.CheckUniquePath(instances, newInstance, newInstance.GroupPath, newInstance.Title); err != nil {
+		out.Error(err.Error(), ErrCodeAlreadyExists)
+		exitCLI(1)
+	}
 
 	// Quick mode generated a machine-named adjective-noun handle; mark it so the
 	// TUI shows Claude's live task description in place of the random name. This
@@ -3558,6 +3562,10 @@ func handleRename(profile string, args []string) {
 	// identical condition, forcing --json consumers to special-case `rename`.
 	if msg, code := checkTitleConflict(instances, inst, newTitle); msg != "" {
 		out.Error(msg, code)
+		exitCLI(1)
+	}
+	if err := session.CheckUniquePath(instances, inst, inst.GroupPath, newTitle); err != nil {
+		out.Error(err.Error(), ErrCodeAlreadyExists)
 		exitCLI(1)
 	}
 

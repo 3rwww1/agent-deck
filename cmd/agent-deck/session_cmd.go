@@ -2598,6 +2598,10 @@ func handleSessionSet(profile string, args []string) {
 			out.Error(msg, code)
 			exitCLI(1)
 		}
+		if err := session.CheckUniquePath(instances, inst, inst.GroupPath, value); err != nil {
+			out.Error(err.Error(), ErrCodeAlreadyExists)
+			exitCLI(1)
+		}
 	}
 	// #2683: an archived record holding this Claude id wins the duplicate-id
 	// guard on save, so the set would print success and then revert.
