@@ -78,5 +78,5 @@ func (i *Instance) ClaudeLaunchName() string {
 	if i.Command != "" && i.Command != "claude" && !commandHasToken(i.Command, "--fork-session") && !commandHasToken(i.Command, "--session-id") {
 		return ""
 	}
-	return claudeTitleName(i.GetTitleThreadSafe())
+	return claudeTitleName(i.NativeSessionName())
 }

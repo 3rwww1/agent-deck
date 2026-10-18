@@ -114,6 +114,11 @@ type UserConfig struct {
 	// Default: true (nil = true); unreadable config disables automatic naming.
 	PushTitle *bool `toml:"push_title,omitempty"`
 
+	// NativeNameFromPath names the tool's own session after its place in the
+	// tree, group path + "/" + title, for Claude (--name) and OpenCode 2.x
+	// (session title). Applies at the next start/restart. Default: false.
+	NativeNameFromPath bool `toml:"native_name_from_path,omitempty"`
+
 	// GroupSort controls the order of sessions within a group.
 	//   "creation"   (default) — fixed creation order; honors K/J manual reorder.
 	//   "actionable"           — issue #857 status→recency→Order surfacing.
@@ -2056,6 +2061,12 @@ func (c *UserConfig) GetPushTitle() bool {
 		return true
 	}
 	return *c.PushTitle
+}
+
+// GetNativeNameFromPath returns whether the native session name carries the
+// group path. Defaults to false.
+func (c *UserConfig) GetNativeNameFromPath() bool {
+	return c.NativeNameFromPath
 }
 
 // GetGroupSort returns the normalized within-group sort mode: "actionable" or

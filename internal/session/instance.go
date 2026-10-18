@@ -2288,6 +2288,7 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 			if i.openCodeV2LaunchesBare() {
 				i.bindMintedOpenCodeSession()
 			}
+			go i.pushOpenCodeNativeName(openCodeServiceWaitLimit, openCodeServiceWaitPoll)
 			// V2 uses the shared service instead of a per-TUI --port server.
 			i.setOpenCodePort(0)
 			if i.OpenCodeSessionID != "" && !i.openCodeV2HasSessionOptions() {
