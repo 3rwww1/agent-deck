@@ -307,10 +307,16 @@ func openCodeAPICommand(ctx context.Context, binary string, args ...string) *exe
 	if ok {
 		target = []string{"--server", svc.URL}
 	}
-	// #nosec G204 -- binary is the resolved opencode binary and agent-deck builds every argument; no shell.
-	cmd := exec.CommandContext(ctx, binary, slices.Concat([]string{"api"}, args, target)...)
+	argv := slices.Concat([]string{"api"}, args, target)
+	// A configured launcher may carry environment assignments before the binary.
+	cmd, err := (&Instance{Command: binary}).openCodeCLICommand(ctx, "", argv...)
+	if err != nil {
+		// #nosec G204 -- binary is the resolved opencode binary and agent-deck builds every argument; no shell.
+		cmd = exec.CommandContext(ctx, binary, argv...)
+		cmd.Env = childenv.ForLaunch("")
+	}
 	if svc.Password != "" {
-		cmd.Env = append(childenv.ForLaunch(""), "OPENCODE_PASSWORD="+svc.Password)
+		cmd.Env = append(cmd.Env, "OPENCODE_PASSWORD="+svc.Password)
 	}
 	return cmd
 }
