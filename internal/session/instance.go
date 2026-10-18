@@ -2200,6 +2200,7 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 		var extraFlags string
 		if i.openCodeRejectsV1LaunchFlags() {
 			i.bindMintedOpenCodeSession()
+			go i.pushOpenCodeNativeName(openCodeServiceWaitLimit, openCodeServiceWaitPoll)
 			cmd = i.attachOpenCodeToSharedService(cmd)
 			// 2.x exits on -m/--agent/--port (opencode_version.go). Without
 			// --port there is no SSE server, so status falls back to tmux.
