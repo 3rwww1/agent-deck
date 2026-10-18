@@ -7881,6 +7881,45 @@ func DetachClientsOnSockets(sockets ...string) (bool, error) {
 	return detached, firstErr
 }
 
+// DetachClientByPID detaches the one non-control client on socket whose
+// process id is pid ("" = default server). Returns detached=false (no error)
+// when no such client is attached, e.g. a pid recorded by a TUI that has
+// since left that attach (#2704).
+func DetachClientByPID(socket string, pid int) (bool, error) {
+	if pid <= 0 {
+		return false, nil
+	}
+	output, err := runBoundedOutput(socket, "list-clients", "-F", tmuxFmt("#{client_control_mode}", "#{client_pid}", "#{client_name}"))
+	if err != nil {
+		return false, nil
+	}
+	name := clientNameForPID(string(output), pid)
+	if name == "" {
+		return false, nil
+	}
+	if err := runBoundedMutation(socket, "detach-client", "-c", name); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// clientNameForPID parses list-clients output of control-mode flag, client
+// pid and client name, and returns the name of the non-control client with
+// that pid, or "". client_name goes last: it is free text.
+func clientNameForPID(output string, pid int) string {
+	want := strconv.Itoa(pid)
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		parts := strings.SplitN(line, tmuxFieldSep, 3)
+		if len(parts) != 3 || parts[0] == "1" || parts[2] == "" {
+			continue
+		}
+		if parts[1] == want {
+			return parts[2]
+		}
+	}
+	return ""
+}
+
 // UnbindKey removes a key binding and restores default behavior.
 // After unbinding, attempts to restore the default behavior where number keys
 // select windows. The restore is best-effort since it may fail in environments
