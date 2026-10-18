@@ -9,6 +9,7 @@ Commands:
   move <id> <group> Move session to a different group
   change <group> [<dest>] Reparent a group (empty dest = move to root)
   reorder <name>    Reorder a group (--up, --down, --position N)
+  duplicates        List titles held twice in one group (alias: dups)
 
 Examples:
   agent-deck group list
