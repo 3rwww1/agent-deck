@@ -980,9 +980,7 @@ func main() {
 			_ = db.ReleaseAllClaims()
 			_ = db.UnregisterInstance()
 		}
-		// Hand the outer terminal's cursor and pointer back if the embedded
-		// terminal owned them; deferred releases do not survive os.Exit.
-		runEmbeddedTerminalCleanup()
+		signalTerminalCleanup()
 		_ = events.CloseDefault()
 		exitCLI(0)
 	}()
@@ -1382,11 +1380,12 @@ func main() {
 		p.Send(ui.MaintenanceCompleteMsg{Result: result})
 	})
 
+	tuiRunning.Store(true)
 	_, runErr := p.Run()
+	tuiRunning.Store(false)
 	homeModel.CloseTelemetryAfterRun(runErr)
 	if runErr != nil {
-		runEmbeddedTerminalCleanup()
-		fmt.Printf("Error: %v\n", runErr)
+		reportTUIRunError(runErr)
 		exitCLI(1)
 	}
 

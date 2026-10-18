@@ -19877,13 +19877,7 @@ func overlayAtCells(base, overlay string, row, col int) string {
 // renderPanelTitle creates a styled section title with underline
 func (h *Home) renderPanelTitle(title string, width int) string {
 	// Truncate title if it exceeds width
-	if len(title) > width {
-		if width > 3 {
-			title = title[:width-3] + "..."
-		} else {
-			title = title[:width]
-		}
-	}
+	title = truncateDisplay(title, width, "...")
 
 	titleStyle := lipgloss.NewStyle().
 		Foreground(ColorCyan).
@@ -20153,15 +20147,13 @@ func renderEmptyStateResponsive(config EmptyStateConfig, width, height int) stri
 	content.WriteString(titleStyle.Render(config.Title))
 
 	// Subtitle - shown in full and compact modes
+	// (padding and margins take hPad*2+4 columns; a pane too narrow for a
+	// shortened subtitle leaves it out).
 	if config.Subtitle != "" && (tier != "minimal" || config.ShowSubtitleMinimal) {
-		content.WriteString("\n")
-		// Truncate subtitle if width is tight
-		subtitle := config.Subtitle
-		maxSubtitleWidth := width - hPad*2 - 4 // Account for padding and margins
-		if maxSubtitleWidth > 0 && len(subtitle) > maxSubtitleWidth {
-			subtitle = subtitle[:maxSubtitleWidth-3] + "..."
+		if subtitle, ok := fitEmptyStateText(config.Subtitle, width-hPad*2-4); ok {
+			content.WriteString("\n")
+			content.WriteString(subtitleStyle.Render(subtitle))
 		}
-		content.WriteString(subtitleStyle.Render(subtitle))
 	}
 
 	// Body - extra plain lines, same tiers as Subtitle. Rendered as one
@@ -20194,22 +20186,24 @@ func renderEmptyStateResponsive(config EmptyStateConfig, width, height int) stri
 		if tier == "minimal" && config.ShowAllHintsMinimal {
 			hintCount = len(config.Hints)
 		}
-		hintsToShow := config.Hints[:hintCount]
-
-		if tier == "full" {
-			content.WriteString("\n\n")
-		} else {
-			content.WriteString("\n")
+		// Each hint gets the width minus padding, margins and the "• "
+		// prefix (hPad*2+6); one that cannot be shortened usefully is left out.
+		var hintsToShow []string
+		for _, hint := range config.Hints[:hintCount] {
+			if displayHint, ok := fitEmptyStateText(hint, width-hPad*2-6); ok {
+				hintsToShow = append(hintsToShow, displayHint)
+			}
 		}
 
-		for i, hint := range hintsToShow {
-			// Truncate hint if width is tight
-			displayHint := hint
-			maxHintWidth := width - hPad*2 - 6 // Account for "• " prefix and margins
-			if maxHintWidth > 0 && len(displayHint) > maxHintWidth {
-				displayHint = displayHint[:maxHintWidth-3] + "..."
+		if len(hintsToShow) > 0 {
+			if tier == "full" {
+				content.WriteString("\n\n")
+			} else {
+				content.WriteString("\n")
 			}
-			content.WriteString(hintStyle.Render("• " + displayHint))
+		}
+		for i, hint := range hintsToShow {
+			content.WriteString(hintStyle.Render("• " + hint))
 			if i < len(hintsToShow)-1 {
 				content.WriteString("\n")
 			}
@@ -22513,9 +22507,7 @@ func (h *Home) renderSessionItem(
 	worktreeBadge := ""
 	if inst.IsWorktree() && inst.WorktreeBranch != "" {
 		branch := inst.WorktreeBranch
-		if len(branch) > 15 {
-			branch = branch[:12] + "..."
-		}
+		branch = truncateDisplay(branch, 15, "...")
 		wtStyle := lipgloss.NewStyle().Foreground(ColorCyan)
 		if selected {
 			wtStyle = SessionStatusSelStyle
@@ -22548,9 +22540,7 @@ func (h *Home) renderSessionItem(
 	sshBadge := ""
 	if inst.IsSSH() {
 		host := inst.SSHHost
-		if len(host) > 20 {
-			host = host[:17] + "..."
-		}
+		host = truncateDisplay(host, 20, "...")
 		sshStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
 		if selected {
 			sshStyle = SessionStatusSelStyle
@@ -23265,9 +23255,7 @@ func (h *Home) renderRemoteSessionItemAtWidth(b *strings.Builder, item session.I
 	}
 
 	titleStr := rs.Title
-	if len(titleStr) > 25 {
-		titleStr = titleStr[:22] + "..."
-	}
+	titleStr = truncateDisplay(titleStr, 25, "...")
 
 	toolStr := ""
 	if rs.Tool != "" && !h.toolBadgeHidden(rs.Tool) {
