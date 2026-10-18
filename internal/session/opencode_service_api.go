@@ -12,6 +12,7 @@ import (
 var openCodeServiceRoutes = map[string]struct{ method, path string }{
 	"session.get":         {http.MethodGet, "/api/session/%s"},
 	"session.remove":      {http.MethodDelete, "/api/session/%s"},
+	"session.update":      {http.MethodPatch, "/api/session/%s"},
 	"session.fork":        {http.MethodPost, "/api/session/%s/fork"},
 	"session.switchAgent": {http.MethodPost, "/api/session/%s/agent"},
 	"session.switchModel": {http.MethodPost, "/api/session/%s/model"},

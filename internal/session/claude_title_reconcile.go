@@ -245,7 +245,7 @@ func (i *Instance) ResolveTitleFromClaude(sessionID string) (string, bool) {
 		return "", false
 	}
 	name := ClaudeSessionName(sessionID)
-	if name == "" || name == i.Title {
+	if name == "" || name == i.Title || name == i.NativeSessionName() {
 		return "", false
 	}
 	return name, true
