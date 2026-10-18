@@ -8726,6 +8726,11 @@ type ResponseOutput struct {
 	SessionID           string `json:"session_id,omitempty"`            // Conversation session ID, if available
 	CodexTurnGeneration string `json:"codex_turn_generation,omitempty"` // Exact thread:turn identity, if retained
 	ClaudeTurnUUID      string `json:"claude_turn_uuid,omitempty"`      // Bound Claude user record, if retained
+	// AssistantUUID is the transcript uuid of the Claude assistant record
+	// Content was read from; the turn identity an inbox record carries as
+	// turn_uuid. Empty for pane, terminal and non-Claude reads. Not part of
+	// the CLI output.
+	AssistantUUID string `json:"-"`
 }
 
 // GetLastResponse returns the last assistant response from the session
@@ -9731,10 +9736,12 @@ func parseClaudeLastAssistantMessage(data []byte, sessionID string) (*ResponseOu
 		Message     json.RawMessage `json:"message"`
 		Timestamp   string          `json:"timestamp"`
 		IsSidechain bool            `json:"isSidechain"`
+		UUID        string          `json:"uuid"`
 	}
 
 	var lastAssistantContent string
 	var lastTimestamp string
+	var lastUUID string
 	var foundSessionID string
 
 	// Walk lines from EOF backward; the first non-sidechain assistant record
@@ -9819,6 +9826,7 @@ func parseClaudeLastAssistantMessage(data []byte, sessionID string) (*ResponseOu
 		if extractedText != "" {
 			lastAssistantContent = extractedText
 			lastTimestamp = record.Timestamp
+			lastUUID = record.UUID
 			if foundSessionID != "" {
 				break
 			}
@@ -9830,11 +9838,12 @@ func parseClaudeLastAssistantMessage(data []byte, sessionID string) (*ResponseOu
 	}
 
 	return &ResponseOutput{
-		Tool:      "claude",
-		Role:      "assistant",
-		Content:   lastAssistantContent,
-		Timestamp: lastTimestamp,
-		SessionID: foundSessionID,
+		Tool:          "claude",
+		Role:          "assistant",
+		Content:       lastAssistantContent,
+		Timestamp:     lastTimestamp,
+		SessionID:     foundSessionID,
+		AssistantUUID: lastUUID,
 	}, nil
 }
 
