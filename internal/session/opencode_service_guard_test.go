@@ -399,6 +399,69 @@ func TestRunOpenCodeServiceCall_TargetsSharedServiceOrStandalone(t *testing.T) {
 	}
 }
 
+// During a stall every standalone lookup ran to its 5s kill and held a status worker, so lookups keep the binding without one.
+func TestQueryOpenCodeSession_V2SkipsStandaloneWhileServiceHangs(t *testing.T) {
+	pinOpenCodeMajorVersion(t, 2, true)
+	emptyPage := `{"data":[],"cursor":{"previous":null,"next":null}}`
+	dir := setFakeOpenCodeSessionGet(t, emptyPage, movedSessionPayload("ses_BOUND", t.TempDir()))
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+	prev := sharedOpenCodeService
+	sharedOpenCodeService = fake.guard(t.TempDir())
+	t.Cleanup(func() { sharedOpenCodeService = prev })
+
+	inst := &Instance{Tool: "opencode", ProjectPath: t.TempDir(), OpenCodeSessionID: "ses_BOUND"}
+	for range 3 {
+		inst.updateOpenCodeSession(true)
+		fake.advance(openCodeServiceRetryGap)
+	}
+	if inst.OpenCodeSessionID != "ses_BOUND" {
+		t.Fatalf("binding = %q during the stall, want ses_BOUND kept", inst.OpenCodeSessionID)
+	}
+	if spawned, _ := filepath.Glob(filepath.Join(dir, "argv.*")); len(spawned) > 0 {
+		t.Fatalf("started %d standalone opencode lookups while the service hung, want 0", len(spawned))
+	}
+
+	lookupFallsBack := func(phase string, wantCalls int) {
+		t.Helper()
+		fake.advance(openCodeServiceRetryGap)
+		if got := inst.queryOpenCodeSession(); got != "ses_BOUND" {
+			t.Fatalf("%s: session ID = %q, want ses_BOUND from the standalone lookup", phase, got)
+		}
+		if got := fakeOpenCodeCallCount(t, dir); got != wantCalls {
+			t.Fatalf("%s: opencode call count = %d, want %d", phase, got, wantCalls)
+		}
+	}
+	stubStatus := sharedOpenCodeService.status
+
+	// A check that fails for another reason, once the stall is past, falls back again.
+	sharedOpenCodeService.status = func(string) (openCodeService, error) {
+		return openCodeService{}, errors.New("opencode service status: timed out")
+	}
+	fake.advance(openCodeServiceFailureGap)
+	lookupFallsBack("past the stall", 1)
+
+	stallAgain := func(wantCalls int) {
+		t.Helper()
+		sharedOpenCodeService.status = stubStatus
+		fake.advance(openCodeServiceRetryGap)
+		inst.updateOpenCodeSession(true)
+		if got := fakeOpenCodeCallCount(t, dir); got != wantCalls {
+			t.Fatalf("silent again: opencode call count = %d, want %d", got, wantCalls)
+		}
+	}
+
+	// A stopped or disabled service leaves nothing to hang on, so the lookup falls back inside the gap.
+	stallAgain(1)
+	fake.mu.Lock()
+	fake.stopped = true
+	fake.mu.Unlock()
+	lookupFallsBack("stopped inside the gap", 2)
+
+	stallAgain(2)
+	sharedOpenCodeService.status = func(string) (openCodeService, error) { return openCodeService{}, errOpenCodeServiceDisabled }
+	lookupFallsBack("disabled inside the gap", 3)
+}
+
 // A lane launched bare runs OpenCode's own service check, which kills a silent service, so it waits instead.
 func TestBuildOpenCodeCommand_V2WaitsForSilentRegisteredService(t *testing.T) {
 	pinOpenCodeMajorVersion(t, 2, true)
