@@ -12266,6 +12266,10 @@ func runOpenCodeServiceCallContext(ctx context.Context, binary, workDir, operati
 			return output, err
 		}
 	}
+	// A standalone call during a stall runs to its kill timeout and holds its caller that long.
+	if sharedOpenCodeService.stalled() {
+		return nil, errOpenCodeServiceStalled
+	}
 	// #nosec G204 -- binary is the configured opencode resolved by
 	// openCodeLaunchBinary, operation is a constant at every call site,
 	// sessionID passed a shell-safe identifier check, and the JSON body is
