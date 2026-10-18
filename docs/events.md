@@ -95,6 +95,10 @@ name. Typically:
 | `cursor.state` | Last sealed cursor, retained even when all sealed segments are compacted. |
 | `drops.count` | Cumulative drops from all producers for this profile. |
 
+The log is private to its user: the directory (and `want/`) is mode 0700 and
+every file 0600. A log an older core wrote with 0755/0644 is tightened when
+it is next opened.
+
 Rotation: the active segment seals (renamed to `seg-*`) on the next sync pass
 after it passes 8 MiB or 50,000 frames, and a fresh `active.ndjson` starts.
 This keeps file data durable before the sealed cursor range is published. Compaction:
@@ -163,7 +167,7 @@ a drop; the directory must already exist (`ErrNoBus` otherwise).
 |---|---|
 | `agent-deck events follow --json [--after <cursor>] [--kind <prefix,...>] [--session <id>] [--bus events\|comms] [--read-only] [--profile <name>]` | NDJSON frames, oldest first, streams live until killed. `--jsonl` and `--since` are aliases of `--json` and `--after`; `agent-deck remote <name> events follow --jsonl --since <cursor>` forwards the same stream from a registered remote (docs/remote-recall.md); that forwarded stream ends with exit 0 as soon as the controller's stdin closes, so stdin from `/dev/null` ends it within seconds with no output, while the local command ignores stdin. `--kind session` matches `session.*`; `--kind macapp.` matches the namespace; filters never change cursors. `--bus comms` follows the comms ledger (read-only; docs/comms.md). `--read-only` observes the events bus of the resolved profile without restarting queued send workers, without a writer handle and without a demand lease, so `tmux.output` frames appear only while another follower asks for them; it exits with an error when no writer has created the bus yet. `--profile` reads another existing profile's log (a missing profile, or a path such as `a/b`, is refused); a forwarded remote command runs with the `-p` fixed by the remote config, so this is how a client reaches another profile on that host. |
 | `agent-deck events stats --json [--bus events\|comms] [--read-only]` | `{enabled, dir, cursor, published, written, synced, dropped, queue_len, queue_cap, kinds: {kind: retained count}}`. `--read-only` counts the existing log without opening a writer. |
-| `agent-deck events publish --kind macapp.<name> [--session <id>] [--data <json> \| --data-file <path\|->] [--profile <name>] [--json]` | Publishes one frame and waits (≤ 2 s) until it is committed; prints `{ok, kind, session_id, cursor, profile}`. Only the `macapp.*` namespace, with `[macapp] plugins = true` required except for the Mac app's own frames `macapp.open`, `macapp.open.ack`, `macapp.browser.response` and `macapp.app.focus` (exit 2 otherwise; `macapp.browser.request` also needs `[browser] enabled = true`, see docs/macapp-browser.md). `--data-file` payloads are capped at 2 MiB. `--session` defaults to `$AGENTDECK_INSTANCE_ID`; `--profile` publishes on another existing profile's log (a profile name, never a path). See "Remote reply publish" below for `agent-deck remote <name> events publish`. |
+| `agent-deck events publish --kind macapp.<name> [--session <id>] [--data <json> \| --data-file <path\|->] [--profile <name>] [--json]` | Publishes one frame and waits (≤ 2 s) until it is committed; prints `{ok, kind, session_id, cursor, profile}`. `--kind` must be lowercase: a kind with any uppercase letter (`macapp.myPlugin`, `macapp.Browser.Request`) is refused with exit 2 before the namespace and opt-in checks, so a mixed-case spelling never passes as another kind. Only the `macapp.*` namespace, with `[macapp] plugins = true` required except for the Mac app's own frames `macapp.open`, `macapp.open.ack`, `macapp.browser.response` and `macapp.app.focus` (exit 2 otherwise; `macapp.browser.request` also needs `[browser] enabled = true`, see docs/macapp-browser.md). `--data-file` payloads are capped at 2 MiB. `--session` defaults to `$AGENTDECK_INSTANCE_ID`; `--profile` publishes on another existing profile's log (a profile name, never a path). See "Remote reply publish" below for `agent-deck remote <name> events publish`. |
 
 ### Remote reply publish
 
@@ -183,6 +187,8 @@ sends the Mac app's reply to a session on a remote host. Checks:
   rules, and the frame may only reference a session of that host: `--session`
   must name a session in the profile it is published on (exit 2 otherwise).
   Only `macapp.app.focus`, which is about the app, may omit `--session`.
+  These box checks are defence in depth on top of the controller's: the
+  controller sets `--from-remote`, so they do not authenticate it.
 
 ### Mac app checks
 

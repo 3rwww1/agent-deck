@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Events
+
+- `agent-deck events publish` accepts only lowercase kind names: a kind with an uppercase letter, such as a third-party plugin's `macapp.myPlugin`, now gets exit 2. Rename such a kind to lowercase (`macapp.myplugin`).
+
 ## [1.16.30] - 2026-10-18
 
 ### Highlights
