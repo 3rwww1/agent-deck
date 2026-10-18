@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"fmt"
+	"github.com/asheshgoplani/agent-deck/internal/filelinks"
 	"log/slog"
 	"maps"
 	"os"
@@ -1043,6 +1044,12 @@ type WebSettings struct {
 	// hosts that are NOT on TrustedDomains. nil (omitted) defaults to true.
 	// Setting it false accepts the risk and opens every link directly.
 	ConfirmLinkOpen *bool `toml:"confirm_link_open,omitempty"`
+
+	// FileLinkRoots lists directories whose files the web terminal may open
+	// through the deck when a file:// link points into them (issue #2676).
+	// `~` and $VARS expand. Empty (the default) keeps file links off: a click
+	// only copies the path.
+	FileLinkRoots []string `toml:"file_link_roots,omitempty"`
 }
 
 // FeedbackSettings controls the in-product feedback prompts.
@@ -4896,6 +4903,23 @@ func GetWebTrustedDomains() []string {
 		return nil
 	}
 	return NormalizeTrustedDomains(config.Web.TrustedDomains)
+}
+
+// GetWebFileLinkRoots returns the expanded, absolute `[web].file_link_roots`
+// directories (issue #2676). nil means file links are off.
+func GetWebFileLinkRoots() []string {
+	roots, _ := GetWebFileLinkRootsChecked()
+	return roots
+}
+
+// GetWebFileLinkRootsChecked is GetWebFileLinkRoots plus the entries it
+// refused and why (an unset $VAR, `/`, the home directory, a relative path).
+func GetWebFileLinkRootsChecked() ([]string, []filelinks.Refused) {
+	config, err := LoadUserConfig()
+	if err != nil || config == nil {
+		return nil, nil
+	}
+	return filelinks.CheckRoots(config.Web.FileLinkRoots, ExpandPath)
 }
 
 // GetWebAllowedHosts returns the configured Host allowlist additions.
