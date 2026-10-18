@@ -4670,7 +4670,7 @@ func (s *Session) GetStatus() (string, error) {
 		case TitleStateDone:
 			// Done marker, Claude still alive. Fall through to existing detection
 			// for waiting vs idle (prompt detection + acknowledgment logic).
-			statusLog.Debug("title_done_fallthrough", slog.String("session", shortName))
+			logging.Aggregate(logging.CompStatus, "title_done_fallthrough", slog.String("session", shortName))
 
 		default:
 			// Unknown title (non-Claude tools). Fall through to full detection.
@@ -4784,19 +4784,7 @@ func (s *Session) GetStatus() (string, error) {
 
 			// Check for explicit busy indicator (spinner, "ctrl+c to interrupt")
 			isExplicitlyBusy := s.hasBusyIndicator(content)
-			// Debug: show last line of content for this session
-			lines := strings.Split(content, "\n")
-			lastLine := ""
-			for i := len(lines) - 1; i >= 0; i-- {
-				if strings.TrimSpace(lines[i]) != "" {
-					lastLine = lines[i]
-					if len(lastLine) > 60 {
-						lastLine = lastLine[:60] + "..."
-					}
-					break
-				}
-			}
-			statusLog.Debug("needs_busy_check", slog.String("session", shortName), slog.Bool("busy", isExplicitlyBusy), slog.String("last_line", lastLine))
+			logging.Aggregate(logging.CompStatus, "needs_busy_check", slog.String("session", shortName), slog.Bool("busy", isExplicitlyBusy))
 
 			// Check for prompt indicators (AskUserQuestion, permission dialogs, etc.)
 			// BUSY indicator is AUTHORITATIVE: if spinner is active (or in grace period),
@@ -4866,7 +4854,7 @@ func (s *Session) GetStatus() (string, error) {
 				}
 				s.lastStableStatus = "waiting"
 				s.startupAt = time.Time{}
-				statusLog.Debug("prompt_detected_waiting", slog.String("session", shortName))
+				logging.Aggregate(logging.CompStatus, "prompt_detected_waiting", slog.String("session", shortName))
 				return "waiting", nil
 			}
 
@@ -5857,7 +5845,7 @@ func (s *Session) hasBusyIndicatorResolved(content string) bool {
 		return true
 	}
 
-	statusLog.Debug("busy_no_spinner", slog.String("session", shortName))
+	logging.Aggregate(logging.CompStatus, "busy_no_spinner", slog.String("session", shortName))
 	return false
 }
 
