@@ -2337,6 +2337,10 @@ func handleSessionSet(profile string, args []string) {
 			out.Error(msg, code)
 			exitCLI(1)
 		}
+		if err := session.CheckUniquePath(instances, inst, inst.GroupPath, value); err != nil {
+			out.Error(err.Error(), ErrCodeAlreadyExists)
+			exitCLI(1)
+		}
 	}
 	if field == session.FieldOpenCodeSessionID {
 		if msg, code := checkOpenCodeSessionConflict(instances, inst, value); msg != "" {

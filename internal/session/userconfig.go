@@ -118,6 +118,11 @@ type UserConfig struct {
 	// (session title). Applies at the next start/restart. Default: false.
 	NativeNameFromPath bool `toml:"native_name_from_path,omitempty"`
 
+	// UniquePaths refuses a create, rename or move that would give two
+	// sessions the same title in one group. Existing duplicates are listed by
+	// `agent-deck group duplicates`, never renamed. Default: false.
+	UniquePaths bool `toml:"unique_paths,omitempty"`
+
 	// GroupSort controls the order of sessions within a group.
 	//   "creation"   (default) — fixed creation order; honors K/J manual reorder.
 	//   "actionable"           — issue #857 status→recency→Order surfacing.
@@ -2038,6 +2043,12 @@ func (c *UserConfig) GetPushTitle() bool {
 // group path. Defaults to false.
 func (c *UserConfig) GetNativeNameFromPath() bool {
 	return c.NativeNameFromPath
+}
+
+// GetUniquePaths returns whether a title must be unique within its group.
+// Defaults to false.
+func (c *UserConfig) GetUniquePaths() bool {
+	return c.UniquePaths
 }
 
 // GetGroupSort returns the normalized within-group sort mode: "actionable" or
