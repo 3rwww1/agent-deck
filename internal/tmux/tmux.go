@@ -504,7 +504,16 @@ func isEmptyTmuxServerResult(err error) bool {
 	if !errors.As(err, &exitErr) {
 		return false
 	}
-	stderr := strings.ToLower(string(exitErr.Stderr))
+	stderr := strings.ToLower(strings.TrimSpace(string(exitErr.Stderr)))
+	// "error connecting to <path> (<reason>)" is never an empty result, not
+	// even for ENOENT: a missing socket file is indistinguishable from a live
+	// server whose socket was unlinked (tmp cleaners) or that lives under
+	// another TMUX_TMPDIR. Reporting it as empty would mark healthy sessions
+	// absent, so it stays unknown. The prefix check also keeps a socket path
+	// that merely contains "no server running" from matching below.
+	if strings.HasPrefix(stderr, "error connecting to ") {
+		return false
+	}
 	return strings.Contains(stderr, "no server running") || strings.Contains(stderr, "no sessions")
 }
 
