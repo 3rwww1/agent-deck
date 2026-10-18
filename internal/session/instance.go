@@ -7062,9 +7062,26 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 			// makes afterwards (Instance.Substate) wins over the record: if
 			// the pane is busy again, absorbCompletedTurnSample reverts the
 			// flip in the same pass.
+			//
+			// A background shell is decided by the same transcript-based
+			// hold as on the Stop hook path (shellHoldsTurn): a lost Stop
+			// hook must not read waiting where a delivered one reads
+			// running / background-work. The scan reads disk, so i.mu is
+			// released around it, then re-checked for a concurrent Kill().
 			if IsClaudeCompatible(i.Tool) && i.noteHookLagSampleLocked() {
-				i.Status = StatusWaiting
-				i.hookLagFlipped = true
+				i.mu.Unlock()
+				work, holds := i.shellHoldsTurn()
+				i.mu.Lock()
+				if i.Status == StatusStopped {
+					return nil
+				}
+				if holds {
+					i.bgWork = work
+					i.bgWorkActive = true
+				} else {
+					i.Status = StatusWaiting
+					i.hookLagFlipped = true
+				}
 			}
 		case "waiting":
 			if IsCodexCompatible(i.Tool) {
@@ -7078,10 +7095,11 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 			} else {
 				// Claude fires its Stop hook (→ "waiting") when the FOREGROUND turn
 				// ends, including the turn that launched a Workflow, background
-				// agents or finite run_in_background shells. Issue #2473: a
-				// running workflow means a running session, so this "waiting"
-				// never overrides a pane or transcript that proves background
-				// work in flight (background_work.go has the merge rule); the
+				// agents or a run_in_background shell. Issue #2473: a running
+				// workflow means a running session, so this "waiting" never
+				// overrides a pane or transcript that proves background work in
+				// flight (background_work.go has the merge rule; a shell counter
+				// counts only while the transcript shows a fresh launch, A5); the
 				// session stays running with substate background-work until the
 				// work reports back. BackgroundWorkSince captures the pane (the
 				// fast path has no captured content; a probe older than this
@@ -7307,7 +7325,9 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 	// work (background_work.go). A pane at the prompt with work in flight is
 	// already "active" from tmux; the transcript can veto a stale workflow row
 	// there, and can hold a waiting/idle pane running while the footer is
-	// briefly not visible (redraw, resize).
+	// briefly not visible (redraw, resize). A shell counter never makes the
+	// pane "active" (A5): the frame reads waiting/idle and only a fresh
+	// background Bash launch in the transcript promotes it here.
 	// A frame that shows an open menu or an error is never promoted: the menu
 	// blocks the turn on the operator (#2185) and the error means no progress.
 	i.bgWorkActive = false
