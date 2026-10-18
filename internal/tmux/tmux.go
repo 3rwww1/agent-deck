@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -458,6 +459,9 @@ type Session struct {
 	cachePrimedUntil time.Time
 	captureSf        singleflight.Group // Deduplicates concurrent CapturePane subprocess calls
 
+	// invalidateCache sets it on every send and fresh capture: a cached window_activity listing can predate a write.
+	statusCaptureDue atomic.Bool
+
 	// Content tracking for HasUpdated (separate from StateTracker)
 	lastHash    string
 	lastContent string
@@ -637,6 +641,7 @@ func (s *Session) invalidateCache() {
 	s.cacheContent = ""
 	s.cacheTime = time.Time{}
 	s.cachePrimedUntil = time.Time{}
+	s.statusCaptureDue.Store(true)
 }
 
 // SetCustomPatterns sets custom patterns for generic tool support

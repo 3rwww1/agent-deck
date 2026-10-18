@@ -181,7 +181,7 @@ func (s *Session) GetStatus() (string, error) {
 
 	// Skip expensive busy indicator check if no activity change and not in active state
 	// This is the key optimization: only call CapturePane() when activity detected
-	needsBusyCheck := false
+	needsBusyCheck := s.statusCaptureDue.Swap(false)
 	if s.stateTracker != nil {
 		// Check busy indicator if:
 		// Check busy indicator if:
@@ -200,6 +200,7 @@ func (s *Session) GetStatus() (string, error) {
 	if needsBusyCheck {
 		// Release lock for slow CapturePane operation
 		s.mu.Unlock()
+		captureStartedAt := time.Now()
 		rawContent, err := s.CapturePane()
 		s.mu.Lock()
 
@@ -328,6 +329,7 @@ func (s *Session) GetStatus() (string, error) {
 				// keep idle status. The prompt is still visible but the user is looking at it.
 				if s.stateTracker.acknowledged {
 					s.resetPromptNoBusyHoldLocked()
+					s.retireSettledActivityLocked(currentTS, captureStartedAt)
 					s.lastStableStatus = "idle"
 					s.startupAt = time.Time{}
 					statusLog.Debug("prompt_detected_idle", slog.String("session", shortName))
@@ -341,6 +343,7 @@ func (s *Session) GetStatus() (string, error) {
 					return "active", nil
 				}
 				s.resetPromptNoBusyHoldLocked()
+				s.retireSettledActivityLocked(currentTS, captureStartedAt)
 				if s.lastStableStatus != "waiting" {
 					s.stateTracker.waitingSince = time.Now()
 				}
@@ -1339,6 +1342,16 @@ func (s *Session) hasBusyIndicatorResolved(content string) bool {
 
 	logging.Aggregate(logging.CompStatus, "busy_no_spinner", slog.String("session", shortName))
 	return false
+}
+
+// promptSettleAge outlasts window_activity's 1 s resolution plus the oldest frame a capture can return.
+var promptSettleAge = 10 * time.Second
+
+// retireSettledActivityLocked lets an unchanged prompt pane skip its next capture once activityTS has settled.
+func (s *Session) retireSettledActivityLocked(activityTS int64, capturedAt time.Time) {
+	if capturedAt.Sub(time.Unix(activityTS, 0)) >= promptSettleAge {
+		s.stateTracker.lastActivityTimestamp = activityTS
+	}
 }
 
 // hasPromptIndicator checks if the terminal shows a prompt waiting for user input.
