@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/asheshgoplani/agent-deck/internal/logging"
 )
 
 // buildEnvSourceCommand builds shell commands to source .env files before the main command.
@@ -57,9 +59,7 @@ func (i *Instance) buildEnvSourceCommand() string {
 		if restartEnv := buildEnvExports(i.restartEnv); restartEnv != "" {
 			sources = append(sources, restartEnv)
 		}
-		if stripExpr := telegramStateDirStripExpr(i); stripExpr != "" {
-			sources = append(sources, stripExpr)
-		}
+		sources = append(sources, i.telegramStripSources()...)
 		if stripExpr := claudeJobDirStripExpr(i); stripExpr != "" {
 			sources = append(sources, stripExpr)
 		}
@@ -162,9 +162,7 @@ func (i *Instance) buildEnvSourceCommand() string {
 	// runs even when no env_file is in play (covers `agent-deck
 	// launch` children outside the conductor's group triangle).
 	// Subsumes the narrower issue #680 predicate.
-	if stripExpr := telegramStateDirStripExpr(i); stripExpr != "" {
-		sources = append(sources, stripExpr)
-	}
+	sources = append(sources, i.telegramStripSources()...)
 	// 9b. #2683: never let a pane inherit CLAUDE_JOB_DIR (see
 	// claudeJobDirStripExpr).
 	if stripExpr := claudeJobDirStripExpr(i); stripExpr != "" {
@@ -665,11 +663,12 @@ func (i *Instance) getToolEnvFile() string {
 }
 
 // getConductorEnv returns shell export commands for conductor-specific env vars.
-// Checks if this session is a conductor (title starts with "conductor-") and loads
-// env and env_file from the conductor's meta.json.
+// Checks if this session is a conductor (ResolveConductorName: stored name, or
+// a possibly decorated "conductor-<name>" title) and loads env and env_file
+// from the conductor's meta.json.
 func (i *Instance) getConductorEnv(ignoreMissing bool) string {
-	name := strings.TrimPrefix(i.Title, "conductor-")
-	if name == "" || name == i.Title {
+	name := i.ResolveConductorName()
+	if name == "" {
 		return "" // not a conductor session
 	}
 	meta, err := LoadConductorMeta(name)
@@ -758,8 +757,8 @@ var telegramEnvVarsToStrip = []string{
 //     "claude <subcommand> ..." through Tool="shell" to skip agent-deck's
 //     own flag injection, but the spawned binary is still claude) — see
 //     instInvokesClaudeBinary.
-//  2. Title does NOT start with "conductor-". Conductors are the
-//     legitimate bot owners even before `Channels` is set.
+//  2. The instance does not resolve to a conductor (ResolveConductorName).
+//     Conductors are the legitimate bot owners even before `Channels` is set.
 //  3. No entry in `Channels` carries the `plugin:telegram@` prefix.
 //     Explicit per-session telegram opt-in keeps the variables.
 //  4. InheritTelegramEnv is false. The #1133 escape hatch.
@@ -788,6 +787,48 @@ func telegramStateDirStripExpr(inst *Instance) string {
 		}
 	}
 	return "unset " + strings.Join(telegramEnvVarsToStrip, " ")
+}
+
+// telegramStripSources returns the prelude clauses for step 9: the
+// TELEGRAM_* unset (when telegramStateDirStripExpr fires) preceded by a pane
+// warning when the session wrapper itself assigns TELEGRAM_STATE_DIR.
+//
+// The wrapper is deliberately NOT treated as a bot-ownership opt-in: forks
+// copy Wrapper (but not Channels), so honouring it would hand every fork of
+// such a session a second `bun telegram` poller on the same token — the 409
+// race S8/#1133 exists to prevent. Instead the strip still wins, but the
+// operator is told why the wrapper's value never reaches the agent rather
+// than it vanishing silently. Conductors, telegram channel owners and
+// --inherit-telegram-env sessions get no strip and therefore no warning.
+func (i *Instance) telegramStripSources() []string {
+	stripExpr := telegramStateDirStripExpr(i)
+	if stripExpr == "" {
+		return nil
+	}
+	if !i.wrapperSetsTelegramStateDir() {
+		return []string{stripExpr}
+	}
+	sessionLog.Warn("session wrapper TELEGRAM_STATE_DIR stripped for non-owning claude session",
+		// The inline ReplaceAll calls are no-ops after SanitizeValue; they are
+		// the newline barrier CodeQL go/log-injection recognises at the sink.
+		slog.String("session", strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeValue(i.Title), "\n", ""), "\r", "")))
+	return []string{
+		paneWarning("wrapper TELEGRAM_STATE_DIR is unset for this session (not a conductor or telegram channel owner); use --channel plugin:telegram@... or --inherit-telegram-env"),
+		stripExpr,
+	}
+}
+
+// wrapperSetsTelegramStateDir reports whether the effective session wrapper
+// (instance or tool-level) assigns TELEGRAM_STATE_DIR. Same substring test
+// as the WRAPPER_DEPRECATED check in telegram_validator.go.
+func (i *Instance) wrapperSetsTelegramStateDir() bool {
+	wrapper := i.Wrapper
+	if wrapper == "" {
+		if toolDef := GetToolDef(i.Tool); toolDef != nil {
+			wrapper = toolDef.Wrapper
+		}
+	}
+	return strings.Contains(wrapper, "TELEGRAM_STATE_DIR=")
 }
 
 // claudeJobDirStripExpr returns `unset CLAUDE_JOB_DIR` for every spawn whose

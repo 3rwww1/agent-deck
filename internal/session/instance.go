@@ -157,6 +157,14 @@ type Instance struct {
 	IsConductor        bool    `json:"is_conductor,omitempty"`         // True if this session is a conductor orchestrator
 	NoTransitionNotify bool    `json:"no_transition_notify,omitempty"` // Suppress transition event dispatch for this session
 
+	// ConductorName is the stable conductor key ([conductors.<name>],
+	// meta.json), stamped by `conductor setup` and persisted in the tool_data
+	// extras zone. The title is display-only and may be decorated or renamed.
+	// Read it via ResolveConductorName (conductor_identity.go), which also
+	// covers old records through the title fallback.
+	ConductorName   string     `json:"conductor_name,omitempty"`
+	conductorNameMu sync.Mutex // guards ConductorName against the lazy fill
+
 	// TitleLocked, when true, blocks Claude's session name from syncing into
 	// the agent-deck Title (issue #697). Conductors launch workers with a
 	// semantic title (e.g. "SCRUM-351") that Claude would otherwise overwrite
@@ -5068,9 +5076,161 @@ func (i *Instance) applyWrapper(command string) (string, error) {
 		return command, nil
 	}
 	if strings.Contains(wrapper, wrapperPlaceholder) {
-		return strings.ReplaceAll(wrapper, wrapperPlaceholder, command), nil
+		return substituteWrapperCommand(wrapper, command), nil
 	}
 	return wrapper, nil
+}
+
+// substituteWrapperCommand replaces {command} in wrapper with command.
+//
+// A wrapper that puts a program or assignment in front of {command} ("env
+// X=Y {command}", "nice {command}", "X=Y {command}") expects {command} to be
+// ONE command. The launch command is usually a compound shell line — the env
+// prelude from buildEnvSourceCommand ("export A=.. && source f && ...") plus
+// "exec claude ..." — so a textual splice produced "env X=Y export A=.. &&
+// ...": env tried to exec a program named "export", the prelude was skipped
+// and the agent ran without X. In that case the command is handed over as a
+// single `bash -c '<command>'` argv instead, so the wrapper's assignment is
+// inherited by the whole line, prelude and agent alike. Such a prefix
+// wrapper therefore receives the command as one argv; a wrapper that
+// re-parses its arguments as a string ("ssh host {command}") should use
+// --ssh or quote the placeholder.
+//
+// Text after {command} ("{command} --flag", issue #601) must still reach the
+// agent, not become bash's $0/$1, so when there is any the payload ends in
+// "$@" and bash is given an explicit $0: `bash -c '<command> "$@"' bash
+// --flag` appends the flags exactly where the textual splice put them.
+//
+// A placeholder inside a quoted string (bash -lc "{command}", nvim
+// +'terminal {command}') is already handed to a shell as a whole, so it is
+// substituted in place, escaped for that quote context; the argv form there
+// would break the wrapper's own quoting.
+//
+// An unquoted placeholder that is already a shell's command string (bash -lc
+// {command}, sh -c {command}) gets the command as that one quoted word,
+// without a second bash -c: wrapping it again made the outer shell run a bare
+// "bash" with the payload as its $0, opening an empty shell instead of the
+// agent, and a textual splice handed the shell only the first word.
+//
+// A wrapper that starts with {command}, or a plain single command, keeps the
+// textual substitution unchanged.
+func substituteWrapperCommand(wrapper, command string) string {
+	parts := strings.Split(wrapper, wrapperPlaceholder)
+	prefix := parts[0]
+	sub := command
+	if strings.TrimSpace(prefix) != "" && placeholderQuoteContext(prefix) == 0 {
+		shellC := prefixEndsWithShellCommandFlag(prefix)
+		if shellC || commandNeedsShell(command) {
+			payload := command
+			if strings.TrimSpace(strings.Join(parts[1:], "")) != "" {
+				payload += ` "$@"`
+			}
+			sub = "'" + strings.ReplaceAll(payload, "'", `'"'"'`) + "'"
+			if !shellC {
+				sub = "bash -c " + sub
+			}
+			if payload != command {
+				sub += " bash"
+			}
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(prefix)
+	for n, part := range parts[1:] {
+		switch placeholderQuoteContext(strings.Join(parts[:n+1], wrapperPlaceholder)) {
+		case '\'':
+			b.WriteString(strings.ReplaceAll(command, "'", `'"'"'`))
+		case '"':
+			b.WriteString(doubleQuoteEscaper.Replace(command))
+		default:
+			b.WriteString(sub)
+		}
+		b.WriteString(part)
+	}
+	return b.String()
+}
+
+// doubleQuoteEscaper escapes the characters that stay special inside a
+// double-quoted shell string.
+var doubleQuoteEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`")
+
+// placeholderQuoteContext scans prefix with shell quoting rules and returns
+// the quote character still open at its end (single or double), or 0.
+func placeholderQuoteContext(prefix string) byte {
+	var quote byte
+	for i := 0; i < len(prefix); i++ {
+		c := prefix[i]
+		switch quote {
+		case '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case '"':
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				quote = 0
+			}
+		default:
+			if c == '\\' {
+				i++
+			} else if c == '\'' || c == '"' {
+				quote = c
+			}
+		}
+	}
+	return quote
+}
+
+// wrapperShells are the shells whose -c option takes the next word as the
+// command string (prefixEndsWithShellCommandFlag).
+var wrapperShells = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash": true, "ksh": true, "mksh": true, "ash": true}
+
+// prefixEndsWithShellCommandFlag reports whether the wrapper text before an
+// unquoted {command} ends with a shell invocation whose short options include
+// -c ("bash -lc ", "/bin/sh -c ", "zsh -l -c "), so the placeholder is that
+// shell's command string.
+func prefixEndsWithShellCommandFlag(prefix string) bool {
+	if prefix == "" || (prefix[len(prefix)-1] != ' ' && prefix[len(prefix)-1] != '\t') {
+		return false
+	}
+	fields := strings.Fields(prefix)
+	sawC := false
+	for n := len(fields) - 1; n >= 0; n-- {
+		f := fields[n]
+		if strings.HasPrefix(f, "-") && !strings.HasPrefix(f, "--") && len(f) > 1 {
+			if strings.Contains(f[1:], "c") {
+				sawC = true
+			}
+			continue
+		}
+		return sawC && wrapperShells[filepath.Base(f)]
+	}
+	return false
+}
+
+// commandNeedsShell reports whether command only works when parsed by a
+// shell: it has an operator or grouping (&&, ;, |, redirection, subshell) or
+// starts with a builtin or VAR=val assignment that no program prefix can
+// exec. False positives are harmless (bash -c runs a simple command the same).
+func commandNeedsShell(command string) bool {
+	if strings.ContainsAny(command, ";&|<>()`\n") {
+		return true
+	}
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	if strings.Contains(fields[0], "=") {
+		return true
+	}
+	switch fields[0] {
+	case "export", "source", ".", "cd", "exec", "unset", "eval", "set",
+		"if", "for", "while", "until", "case", "{", "[", "[[", "!", "time":
+		return true
+	}
+	return false
 }
 
 // hasEffectiveWrapper returns true if the instance has a wrapper configured,

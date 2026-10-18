@@ -6715,7 +6715,7 @@ func (h *Home) backgroundStatusUpdate() {
 		}
 		if tmuxSess := inst.GetTmuxSession(); tmuxSess != nil {
 			h.clearOnCompactSent[inst.ID] = time.Now()
-			conductorName := strings.TrimPrefix(inst.Title, "conductor-")
+			conductorName := conductorDisplayName(inst)
 			safego.Go(uiLog, "conductor_clear_and_heartbeat", func() {
 				time.Sleep(500 * time.Millisecond)
 				msg := fmt.Sprintf("Heartbeat: Check sessions in your group (%s). List any that are waiting, auto-respond where safe, and report what needs my attention.", conductorName)
@@ -14181,13 +14181,12 @@ func (h *Home) stopConductorDeliveries(wait time.Duration) {
 // rewrite h.instances, so the lookup holds the read lock for the whole scan.
 // A headless Home reads the sessions from storage instead (#2530).
 func (h *Home) conductorPane(conductorName string) (string, *tmux.Session) {
-	sessionTitle := session.ConductorSessionTitle(conductorName)
 	if h.headless {
-		return h.conductorPaneFromStorage(sessionTitle)
+		return h.conductorPaneFromStorage(conductorName)
 	}
 	h.instancesMu.RLock()
 	defer h.instancesMu.RUnlock()
-	return findConductorPane(h.instances, sessionTitle)
+	return findConductorPane(h.instances, conductorName)
 }
 
 // conductorPaneFromStorage looks a conductor up for a headless
@@ -14197,30 +14196,32 @@ func (h *Home) conductorPane(conductorName string) (string, *tmux.Session) {
 // (HydrateInstancesFromStorage) could swap the registry under a web mutation
 // in progress (WebMutator.beginHeadlessTx), and a conductor restarted since
 // the last delivery is found under its current tmux session.
-func (h *Home) conductorPaneFromStorage(sessionTitle string) (string, *tmux.Session) {
+func (h *Home) conductorPaneFromStorage(conductorName string) (string, *tmux.Session) {
 	if h.storage == nil {
 		return "", nil
 	}
 	instances, _, err := h.storage.LoadWithGroups()
 	if err != nil {
 		uiLog.Warn("watcher_delivery_conductor_lookup_failed",
-			slog.String("conductor_session", sessionTitle),
+			slog.String("conductor_session", session.ConductorSessionTitle(conductorName)),
 			slog.String("error", err.Error()))
 		return "", nil
 	}
-	return findConductorPane(instances, sessionTitle)
+	return findConductorPane(instances, conductorName)
 }
 
 // findConductorPane returns the id and tmux session of the non-archived
-// instance titled sessionTitle, or a nil session when there is none or it has
-// no tmux session. An archived session keeps the conductor's title but is not
-// the conductor any more, and it may come before the live one.
-func findConductorPane(instances []*session.Instance, sessionTitle string) (string, *tmux.Session) {
+// conductor named conductorName, or a nil session when there is none or it
+// has no tmux session. The stored conductor name wins over the title, so a
+// decorated or renamed conductor still receives its deliveries. An archived
+// session keeps the conductor's identity but is not the conductor any more,
+// and it may come before the live one.
+func findConductorPane(instances []*session.Instance, conductorName string) (string, *tmux.Session) {
 	for _, inst := range instances {
 		// Title and ArchivedAt are written under the instance's own lock
 		// (SetTitleThreadSafe, SetArchivedAtThreadSafe), not instancesMu:
 		// renames, title sync, archive and restart run off the UI goroutine.
-		if inst.GetTitleThreadSafe() != sessionTitle || inst.IsArchived() {
+		if !inst.IsConductorNamed(conductorName, inst.GetTitleThreadSafe()) || inst.IsArchived() {
 			continue
 		}
 		if ts := inst.GetTmuxSession(); ts != nil && ts.Name != "" {
@@ -17543,7 +17544,7 @@ func switchSourceSnapshotFromInstances(inst *session.Instance, instances []*sess
 				managementUnknown = true
 			} else {
 				for _, client := range clients {
-					if client.Conductor == inst.ID || client.Conductor == inst.Title || session.ConductorSessionTitle(client.Conductor) == inst.Title {
+					if client.Conductor == inst.ID || client.Conductor == inst.Title || session.ConductorSessionTitle(client.Conductor) == inst.Title || inst.IsConductorNamed(client.Conductor, inst.Title) {
 						watcherTarget = true
 						break
 					}

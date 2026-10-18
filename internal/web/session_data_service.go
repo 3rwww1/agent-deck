@@ -115,6 +115,10 @@ type MenuSession struct {
 	// secondary lookup. All omit on zero-value so the wire stays compact.
 
 	IsConductor bool `json:"isConductor,omitempty"`
+	// ConductorName is the session's resolved conductor name
+	// (Instance.ResolveConductorName): stable across a decorated or renamed
+	// title. Empty for non-conductor sessions.
+	ConductorName string `json:"conductorName,omitempty"`
 
 	ClaudeSessionID   string `json:"claudeSessionId,omitempty"`
 	GeminiSessionID   string `json:"geminiSessionId,omitempty"`
@@ -378,6 +382,7 @@ func toMenuSession(inst *session.Instance) *MenuSession {
 		LastAccessedAt:     inst.LastAccessedAt,
 		ArchivedAt:         inst.ArchivedAtThreadSafe(),
 		IsConductor:        inst.IsConductor,
+		ConductorName:      inst.ResolveConductorNameThreadSafe(),
 		ClaudeSessionID:    inst.ClaudeSessionID,
 		GeminiSessionID:    inst.GeminiSessionID,
 		GeminiModel:        inst.GeminiModel,
