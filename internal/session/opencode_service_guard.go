@@ -112,6 +112,10 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 	if errors.Is(err, errOpenCodeServiceStopped) || errors.Is(err, errOpenCodeServiceSilent) {
 		g.outages.Add(1)
 	}
+	// With no service left to hang on, an earlier silence no longer makes calls skip the standalone CLI.
+	if errors.Is(err, errOpenCodeServiceStopped) || g.disabled {
+		g.lastFailedAt = time.Time{}
+	}
 
 	var action string
 	switch {
@@ -179,6 +183,13 @@ func (g *openCodeServiceGuard) reportSilent() {
 
 func (g *openCodeServiceGuard) requestsRecentlySilent() bool {
 	return !g.requestSilentAt.IsZero() && g.now().Sub(g.requestSilentAt) < openCodeServiceHealthTTL
+}
+
+// stalled is true while the service went silent within the failure gap.
+func (g *openCodeServiceGuard) stalled() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return !g.lastFailedAt.IsZero() && g.now().Sub(g.lastFailedAt) < openCodeServiceFailureGap
 }
 
 func (g *openCodeServiceGuard) noteFailure(now time.Time) {
@@ -251,7 +262,10 @@ func runOpenCodeServiceAction(binary, action string) error {
 	return cmd.Run()
 }
 
-var errOpenCodeServiceSilent = errors.New("opencode background service did not answer its health probe")
+var (
+	errOpenCodeServiceSilent  = errors.New("opencode background service did not answer its health probe")
+	errOpenCodeServiceStalled = errors.New("opencode background service is stalled")
+)
 
 // probeOpenCodeService makes the same probe an attached TUI makes before it starts.
 func probeOpenCodeService(svc openCodeService) error {
