@@ -75,8 +75,12 @@ func TestOpenCodeRouteWatch_ReopensLaneThatLostItsSessionOnReconnect(t *testing.
 	restartService(os.Getpid())
 	show("OC | Fix the login page")
 	sweep("lanes on their sessions", nil)
+	attached["titled"] = true
+	sweep("user on the pane", nil)
 	show(openCodeHomeTitle)
 	sweep("user went home", nil)
+	attached["titled"] = false
+	sweep("user left it home", nil)
 	sweep("user stays home", nil)
 
 	show("OC | Fix the login page")
@@ -95,14 +99,22 @@ func TestOpenCodeRouteWatch_ReopensLaneThatLostItsSessionOnReconnect(t *testing.
 	sweep("home once after a failed check, same service", map[string]int{"titled": 1})
 	sweep("home twice after a failed check, same service", map[string]int{"titled": 2, "watched": 1})
 
+	show("OC | Fix the login page")
+	sweep("back on their sessions after the outage", map[string]int{"titled": 2, "watched": 1})
+	attached["watched"] = true
+	sweep("watcher back", map[string]int{"titled": 2, "watched": 1})
+	show(openCodeHomeTitle)
+	sweep("home once after an uncounted stall, same service", map[string]int{"titled": 2, "watched": 1})
+	sweep("home twice after an uncounted stall, same service", map[string]int{"titled": 3, "watched": 1})
+
 	if err := os.Remove(stateHome + "/opencode/service.json"); err != nil {
 		t.Fatal(err)
 	}
 	show("OC | Fix the login page")
-	sweep("service gone", map[string]int{"titled": 2, "watched": 1})
+	sweep("service gone", map[string]int{"titled": 3, "watched": 1})
 	show(openCodeHomeTitle)
-	sweep("home with no service, once", map[string]int{"titled": 2, "watched": 1})
-	sweep("home with no service, twice", map[string]int{"titled": 2, "watched": 1})
+	sweep("home with no service, once", map[string]int{"titled": 3, "watched": 1})
+	sweep("home with no service, twice", map[string]int{"titled": 3, "watched": 1})
 }
 
 // Agent-deck's own preview pipe counts as a client: a lane just browsed in the TUI is being looked at.
