@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +40,9 @@ func callOpenCodeService(ctx context.Context, binary, method, path, body string)
 	}
 	resp, err := openCodeSessionHTTPClient.Do(req)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			sharedOpenCodeService.reportSilent()
+		}
 		return nil, true, err
 	}
 	defer resp.Body.Close()

@@ -151,6 +151,48 @@ func TestOpenCodeServiceGuard_StallThatClearsNeverRestarts(t *testing.T) {
 	}
 }
 
+// A frozen service is polled sparsely: lookups back off, so failures more than a minute apart are still one stall.
+func TestOpenCodeServiceGuard_SparselyPolledStallRestartsOnce(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+	g := fake.guard(t.TempDir())
+
+	for elapsed := time.Duration(0); elapsed <= 2*openCodeServiceStallGrace; elapsed += 100 * time.Second {
+		g.attach("opencode")
+		fake.advance(100 * time.Second)
+	}
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts = %d, want 1 for a service silent for %s", got, 2*openCodeServiceStallGrace)
+	}
+}
+
+// A thrashing service can still answer its health route while every session request times out.
+func TestOpenCodeServiceGuard_SilentRequestsRestartAnsweringService(t *testing.T) {
+	release := make(chan struct{})
+	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() { close(release); hung.Close() })
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
+	fake.answer.Store(true)
+	g := useFreshOpenCodeServiceGuard(t)
+	stub := fake.guard(t.TempDir())
+	g.now, g.run, g.probe = stub.now, stub.run, stub.probe
+	g.status = func(string) (openCodeService, error) { return openCodeService{URL: hung.URL}, nil }
+
+	for elapsed := time.Duration(0); elapsed <= openCodeServiceStallGrace+time.Minute; elapsed += 20 * time.Second {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		_, _, _ = callOpenCodeService(ctx, "opencode", http.MethodGet, "/api/session/ses_X", "")
+		cancel()
+		fake.advance(20 * time.Second)
+	}
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts = %d, want 1 for a service whose requests time out for %s", got, openCodeServiceStallGrace+time.Minute)
+	}
+}
+
 // A service that rejects the probe (a 401 from a password agent-deck cannot read, a 503 while it boots) is up, not stalled.
 func TestOpenCodeServiceGuard_RejectedProbeNeverRestarts(t *testing.T) {
 	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}

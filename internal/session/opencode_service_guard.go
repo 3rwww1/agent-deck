@@ -27,7 +27,7 @@ import (
 const (
 	openCodeServiceHealthTTL     = 30 * time.Second
 	openCodeServiceStallGrace    = 2 * time.Minute
-	openCodeServiceFailureGap    = 45 * time.Second
+	openCodeServiceFailureGap    = openCodeServiceStallGrace // lookups back off while the service hangs
 	openCodeServiceRetryGap      = 5 * time.Second
 	openCodeServiceHealthTimeout = 2 * time.Second
 	openCodeServiceActionTimeout = 30 * time.Second
@@ -38,14 +38,15 @@ const (
 )
 
 type openCodeServiceGuard struct {
-	mu             sync.Mutex
-	svc            openCodeService
-	healthyAt      time.Time
-	retryAt        time.Time
-	unhealthySince time.Time
-	lastFailedAt   time.Time
-	disabled       bool
-	outages        atomic.Int64 // checks that found the service stopped or silent, read without waiting on a check in flight
+	mu              sync.Mutex
+	svc             openCodeService
+	healthyAt       time.Time
+	retryAt         time.Time
+	unhealthySince  time.Time
+	lastFailedAt    time.Time
+	requestSilentAt time.Time
+	disabled        bool
+	outages         atomic.Int64 // checks that found the service stopped or silent, read without waiting on a check in flight
 
 	now        func() time.Time
 	lockDir    func() (string, error)
@@ -99,7 +100,11 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 	svc, err := g.status(binary)
 	g.disabled = errors.Is(err, errOpenCodeServiceDisabled)
 	if err == nil {
-		if err = g.probe(svc); err == nil {
+		if err = g.probe(svc); err == nil && g.requestsRecentlySilent() {
+			// A thrashing service can answer the cheap health route while session requests hang.
+			err = errOpenCodeServiceSilent
+		}
+		if err == nil {
 			return g.markHealthy(svc), true
 		}
 	}
@@ -122,10 +127,7 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 	default:
 		// A stall usually clears by itself; failures further apart than the gap are separate outages.
 		now := g.now()
-		if g.unhealthySince.IsZero() || now.Sub(g.lastFailedAt) > openCodeServiceFailureGap {
-			g.unhealthySince = now
-		}
-		g.lastFailedAt = now
+		g.noteFailure(now)
 		if now.Sub(g.unhealthySince) < openCodeServiceStallGrace {
 			return openCodeService{}, false
 		}
@@ -143,6 +145,7 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 			slog.String("action", action), slog.String("error", err.Error()))
 		return openCodeService{}, false
 	}
+	g.requestSilentAt = time.Time{}
 	if svc, err := g.status(binary); err == nil && g.probe(svc) == nil {
 		return g.markHealthy(svc), true
 	}
@@ -164,12 +167,37 @@ func (g *openCodeServiceGuard) launchTarget(binary string) (svc openCodeService,
 	return svc, err == nil, err == nil
 }
 
+// reportSilent records a request to the checked service that got no answer in time.
+func (g *openCodeServiceGuard) reportSilent() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	g.healthyAt = time.Time{}
+	g.requestSilentAt = now
+	g.noteFailure(now)
+}
+
+func (g *openCodeServiceGuard) requestsRecentlySilent() bool {
+	return !g.requestSilentAt.IsZero() && g.now().Sub(g.requestSilentAt) < openCodeServiceHealthTTL
+}
+
+func (g *openCodeServiceGuard) noteFailure(now time.Time) {
+	if g.unhealthySince.IsZero() || now.Sub(g.lastFailedAt) > openCodeServiceFailureGap {
+		g.unhealthySince = now
+	}
+	g.lastFailedAt = now
+}
+
 func (g *openCodeServiceGuard) markHealthy(svc openCodeService) openCodeService {
 	g.svc = svc
 	g.healthyAt = g.now()
 	g.retryAt = time.Time{}
-	g.unhealthySince = time.Time{}
-	g.lastFailedAt = time.Time{}
+	// An answered probe does not end a stall that session requests still report.
+	if g.requestSilentAt.IsZero() || g.healthyAt.Sub(g.requestSilentAt) > openCodeServiceFailureGap {
+		g.unhealthySince = time.Time{}
+		g.lastFailedAt = time.Time{}
+		g.requestSilentAt = time.Time{}
+	}
 	return svc
 }
 
