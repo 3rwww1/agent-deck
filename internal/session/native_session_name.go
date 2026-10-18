@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -15,7 +16,8 @@ func (i *Instance) NativeSessionName() string {
 	if group == "" || !nativeNameFromPathEnabled() {
 		return title
 	}
-	return group + "/" + title
+	// Session names cannot hold "/", so path levels are joined with "_".
+	return strings.ReplaceAll(group, "/", "_") + "_" + title
 }
 
 func nativeNameFromPathEnabled() bool {
