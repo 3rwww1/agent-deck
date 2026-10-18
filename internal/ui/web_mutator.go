@@ -384,6 +384,9 @@ func (m *WebMutator) UndoDelete() (string, error) {
 	return id, nil
 }
 
+// restartForUndo restarts a session an undo brings back (a seam for tests).
+var restartForUndo = func(inst *session.Instance) error { return inst.Restart() }
+
 // restoreDeleted restarts a popped undo entry and re-persists it.
 func (m *WebMutator) restoreDeleted(entry webDeletedEntry) (string, error) {
 
@@ -392,7 +395,7 @@ func (m *WebMutator) restoreDeleted(entry webDeletedEntry) (string, error) {
 	// tool (e.g. a tool the user has since uninstalled). Bubble the
 	// error up so the handler returns 500; the entry has already been
 	// popped, mirroring the TUI's ctrl+z semantics.
-	if err := entry.instance.Restart(); err != nil {
+	if err := restartForUndo(entry.instance); err != nil {
 		return "", fmt.Errorf("restart session: %w", err)
 	}
 
@@ -420,6 +423,13 @@ func (m *WebMutator) restoreDeleted(entry webDeletedEntry) (string, error) {
 	if err := storage.SaveWithGroups(allInstances, m.h.groupTree); err != nil {
 		return "", fmt.Errorf("save session: %w", err)
 	}
+	// The row is back: the delete has nothing left to sweep.
+	if err := storage.ClearPendingDeleteSweep(entry.instance.ID); err != nil {
+		// Strip line breaks so neither can forge log lines (go/log-injection).
+		uiLog.Warn("web_clear_pending_sweep_err",
+			slog.String("id", strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeValue(entry.instance.ID), "\n", ""), "\r", "")),
+			slog.String("err", strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeValue(err.Error()), "\n", ""), "\r", "")))
+	}
 	return entry.instance.ID, nil
 }
 
@@ -428,6 +438,8 @@ func (m *WebMutator) restoreDeleted(entry webDeletedEntry) (string, error) {
 // window, or evicted by the cap, can no longer be undone: their deletes are
 // final and the deferred inbox and notify-state sweep (#910) runs for them.
 func (m *WebMutator) pushUndo(inst *session.Instance) {
+	// The row is deleted: an undo must re-insert it, not update it.
+	inst.ForgetStorageSnapshot()
 	m.undoMu.Lock()
 	window := m.undoWindow
 	if window == 0 {
@@ -482,11 +494,22 @@ func (m *WebMutator) sweepExpiredUndo() {
 // server is stopping, so they can no longer be undone and their deferred
 // sweep runs now. Called by web.Server.Shutdown and on a signal exit.
 func (m *WebMutator) FinalizePendingDeletes() {
+	m.FinalizePendingDeletesWithin(0)
+}
+
+// FinalizePendingDeletesWithin is FinalizePendingDeletes waiting at most
+// timeout for the sweep (0 = no limit); what is not swept by then keeps its
+// pending record for the next start's reconcile.
+func (m *WebMutator) FinalizePendingDeletesWithin(timeout time.Duration) {
 	m.undoMu.Lock()
 	final := m.undoStack
 	m.undoStack = nil
 	m.undoMu.Unlock()
-	m.finalizeWebDeletes(final)
+	if timeout <= 0 {
+		m.finalizeWebDeletes(final)
+		return
+	}
+	runBounded(timeout, func() { m.finalizeWebDeletes(final) })
 }
 
 // finalizeWebDeletes runs the deferred sweep for web deletes that can no
@@ -520,7 +543,7 @@ func (m *WebMutator) finalizeWebDeletes(entries []webDeletedEntry) {
 		defer opened.Close()
 		storage = opened
 	}
-	finalizeRemovedSessions(storage, "web_delete", ids)
+	finalizeRemovedSessionsFn(storage, "web_delete", ids)
 }
 
 // ForkSession forks an existing session using the proper tool-specific fork command.

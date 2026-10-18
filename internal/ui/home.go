@@ -6361,6 +6361,8 @@ func (h *Home) getInstanceByID(id string) *session.Instance {
 // so the deferred inbox and notify-state sweep (#910) runs for it then, in
 // the returned command (nil when nothing was evicted).
 func (h *Home) pushUndoStack(inst *session.Instance) tea.Cmd {
+	// The row is deleted: an undo must re-insert it, not update it.
+	inst.ForgetStorageSnapshot()
 	entry := deletedSessionEntry{
 		instance:  inst,
 		deletedAt: time.Now(),
@@ -6400,6 +6402,21 @@ func (h *Home) finalizeDeletesCmd(ids []string) tea.Cmd {
 		return nil
 	}
 }
+
+// clearPendingSweepCmd drops id's pending delete-sweep record after a
+// successful undo.
+func (h *Home) clearPendingSweepCmd(id string) tea.Cmd {
+	storage := h.storage
+	return func() tea.Msg {
+		if err := storage.ClearPendingDeleteSweep(id); err != nil {
+			uiLog.Warn("clear_pending_sweep_err", slog.String("id", id), slog.String("err", err.Error()))
+		}
+		return nil
+	}
+}
+
+// finalizeRemovedSessionsFn is finalizeRemovedSessions (a seam for tests).
+var finalizeRemovedSessionsFn = finalizeRemovedSessions
 
 // finalizeRemovedSessions sweeps ids (see session.FinalizeRemovedSessions)
 // and logs the outcome.
@@ -8747,7 +8764,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			h.setError(fmt.Errorf("restored '%s'", msg.instance.Title))
 		}
-		return h, h.fetchPreview(msg.instance, msg.instance.ID, -1)
+		// The row is back: the delete has nothing left to sweep, so its
+		// pending record goes (off the Update loop).
+		return h, tea.Batch(h.fetchPreview(msg.instance, msg.instance.ID, -1), h.clearPendingSweepCmd(msg.instance.ID))
 
 	case openCodeDetectionCompleteMsg:
 		if msg.sessionID == "" {
