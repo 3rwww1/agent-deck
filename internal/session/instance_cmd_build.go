@@ -761,7 +761,11 @@ func (i *Instance) buildClaudeExtraFlagsWithName(opts *ClaudeOptions, launchName
 	// fork that other conversation again on every restart. Such selectors are
 	// left out here; see stripStaleSessionSelectors for the exact rules. With
 	// no own id yet (first start) the tokens pass through unchanged.
-	for _, tok := range i.claudeExtraArgsForCommand() {
+	extraArgs := i.claudeExtraArgsForCommand()
+	if launchName != "" {
+		extraArgs = withoutNameArgs(extraArgs)
+	}
+	for _, tok := range extraArgs {
 		flags = append(flags, shellescape.Quote(tok))
 	}
 
