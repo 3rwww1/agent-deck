@@ -154,6 +154,11 @@ type TransitionNotificationEvent struct {
 	// the first (whose fingerprint the digest keeps), newest last and capped
 	// at maxPendingTurnsPerChild, so a re-observed turn is not counted twice.
 	OverflowFolded []string `json:"overflow_folded,omitempty"`
+
+	// restartJudged marks an event emitTurn already judged against the
+	// child's restart token (#2792), so restartBootRecord leaves it alone.
+	// Never serialized.
+	restartJudged bool
 }
 
 // IsUrgent reports whether a consumer must wake for this record: an explicit
@@ -418,6 +423,10 @@ func (n *TransitionNotifier) NotifyTransition(event TransitionNotificationEvent)
 	// pre-filter here did exactly that — it could only see the title, not the
 	// parent linkage, so it silently dropped completions for parented children
 	// whose title merely started with "conductor-".
+	if restartBootRecord(event) {
+		event.DeliveryResult = transitionDeliveryDropped
+		return event
+	}
 	if n.isDuplicate(event) {
 		event.DeliveryResult = transitionDeliveryDropped
 		return event

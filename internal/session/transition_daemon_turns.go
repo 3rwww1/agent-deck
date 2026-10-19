@@ -68,13 +68,25 @@ func (d *TransitionDaemon) emitTurn(profile string, inst *Instance, byID map[str
 	statsParent := statsParentFor(inst)
 	selfConductor := isSelfSuppressedConductor(inst)
 
-	// Issue #2792: the flip a restart's boot makes is not a turn; only an
-	// observed flip can be one (hook and recorded-turn paths see no boot).
-	if observedFlip {
-		if note, boot := takeRestartResume(inst, to, event.Timestamp); boot {
-			return d.emitRestartResumed(inst, event, note, selfConductor), true
-		}
+	// Issue #2792: the old process's exit and the resumed one's arrival at
+	// its prompt are not turns, whichever path sees them.
+	signal := ""
+	if !classified || inst.GetJSONLPath() == "" {
+		signal = event.LastOutputHash
 	}
+	tok, verdict, why := d.judgeRestart(inst.ID, inst.GetJSONLPath(), signal, func() string { return restartPaneSubstate(inst) }, to, event.Timestamp)
+	switch verdict {
+	case restartNewError:
+		return d.emitRestartError(inst, event, tok, why), true
+	case restartUnsettled:
+		return event, false // the next poll judges it once the restart recorded its new process
+	case restartOldExit:
+		event.DeliveryResult = transitionDeliveryDropped
+		return event, true
+	case restartBoot:
+		return d.emitRestartBoot(inst, event, tok, selfConductor), true
+	}
+	event.restartJudged = true
 
 	if !classified {
 		if selfConductor {
