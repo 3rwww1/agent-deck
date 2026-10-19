@@ -51,6 +51,12 @@ func runTestMain(m *testing.M) int {
 		// Must run before anything resolves a path. See internal/testutil/homeenv.go.
 		cleanupHome := testutil.IsolateHome()
 		defer cleanupHome()
+		cleanupServiceManagers, err := stubServiceManagers()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stub service managers: %v\n", err)
+			return 1
+		}
+		defer cleanupServiceManagers()
 	}
 	os.Unsetenv("AGENTDECK_INSTANCE_ID")
 	os.Unsetenv("AGENT_DECK_SESSION_ID")
