@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +40,31 @@ func TestNativeSessionNameKeepsPushTitleOptOut(t *testing.T) {
 	startupNameConfig(t, "native_name_from_path=true\npush_title=false")
 	if got := (&Instance{Tool: "claude", Title: "lane", GroupPath: "team"}).ClaudeLaunchName(); got != "" {
 		t.Errorf("ClaudeLaunchName() = %q with push_title=false, want none", got)
+	}
+}
+
+// A name stored before the option existed must not pin the lane to it.
+func TestNativeSessionNameReplacesStoredName(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		extra      []string
+		want       []string
+	}{
+		{"long flag", "native_name_from_path=true", []string{"--model", "opus", "--name", "team/lane"}, []string{"--name", "team_lane", "--model", "opus"}},
+		{"short flag", "native_name_from_path=true", []string{"-n", "old"}, []string{"--name", "team_lane"}},
+		{"equals form", "native_name_from_path=true", []string{"--name=old"}, []string{"--name", "team_lane"}},
+		{"attached short", "native_name_from_path=true", []string{"-nold"}, []string{"--name", "team_lane"}},
+		{"option off", "", []string{"--name", "mine"}, []string{"--name", "mine"}},
+		{"push_title off", "native_name_from_path=true\npush_title=false", []string{"--name", "mine"}, []string{"--name", "mine"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			startupNameConfig(t, tc.body)
+			inst := &Instance{Tool: "claude", Title: "lane", GroupPath: "team", ExtraArgs: tc.extra, IdentityInjectionDisabled: true}
+			got := startupArgs(t, inst.buildClaudeExtraFlags(nil))
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("argv = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

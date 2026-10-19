@@ -70,7 +70,41 @@ func pushTitleEnabled() bool {
 // It never reads an agent registry or sends input to a running process. Existing
 // startup builders retain ownership of account and conversation selection.
 func (i *Instance) ClaudeLaunchName() string {
-	if i == nil || !IsClaudeCompatible(i.Tool) || extraArgsSupplyName(i.ExtraArgs) || extraArgsSelectSession(i.ExtraArgs) || !pushTitleEnabled() {
+	if i == nil {
+		return ""
+	}
+	return i.claudeDefaultName(i.launchExtraArgs())
+}
+
+// launchExtraArgs is ExtraArgs as the launch passes them. With
+// native_name_from_path on, a stored name gives way to the path name.
+func (i *Instance) launchExtraArgs() []string {
+	if !extraArgsSupplyName(i.ExtraArgs) || !nativeNameFromPathEnabled() {
+		return i.ExtraArgs
+	}
+	nameless := withoutNameArgs(i.ExtraArgs)
+	if i.claudeDefaultName(nameless) == "" {
+		return i.ExtraArgs
+	}
+	return nameless
+}
+
+func withoutNameArgs(args []string) []string {
+	kept := make([]string, 0, len(args))
+	for k := 0; k < len(args); k++ {
+		switch tok := args[k]; {
+		case tok == "--name" || tok == "-n":
+			k++
+		case strings.HasPrefix(tok, "--name=") || strings.HasPrefix(tok, "-n"):
+		default:
+			kept = append(kept, tok)
+		}
+	}
+	return kept
+}
+
+func (i *Instance) claudeDefaultName(extraArgs []string) string {
+	if !IsClaudeCompatible(i.Tool) || extraArgsSupplyName(extraArgs) || extraArgsSelectSession(extraArgs) || !pushTitleEnabled() {
 		return ""
 	}
 	// Match the resume builder's generated-fork distinction. Arbitrary per-row
