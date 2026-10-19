@@ -2164,7 +2164,11 @@ func (i *Instance) buildClaudeExtraFlagsWithName(opts *ClaudeOptions, launchName
 	// not the "cannot be bypassed" guarantee this file's package doc claims.
 	// Stripping/logging --resume/-r/-c/--fork-session/--session-id tokens
 	// from ExtraArgs on the claude path is deferred as a follow-up.
-	for _, tok := range i.ExtraArgs {
+	extraArgs := i.ExtraArgs
+	if launchName != "" {
+		extraArgs = withoutNameArgs(extraArgs)
+	}
+	for _, tok := range extraArgs {
 		flags = append(flags, shellescape.Quote(tok))
 	}
 
@@ -11805,7 +11809,7 @@ func (i *Instance) buildClaudeForkCommandForTarget(target *Instance, opts *Claud
 
 	// Build extra flags from options (for fork, we use ToArgsForFork which excludes session mode)
 	launchName := target.ClaudeLaunchName()
-	if extraArgsSupplyName(i.ExtraArgs) || extraArgsSelectSession(i.ExtraArgs) {
+	if extraArgsSupplyName(i.launchExtraArgs()) || extraArgsSelectSession(i.ExtraArgs) {
 		launchName = ""
 	}
 	extraFlags := i.buildClaudeExtraFlagsWithName(opts, launchName)
