@@ -1175,13 +1175,13 @@ func (inst *Instance) SetToolThreadSafe(t string) {
 // UPDATE is not.
 func (inst *Instance) MarkAccessed() {
 	inst.LastAccessedAt = time.Now()
-	if db := statedb.GetGlobal(); db != nil {
-		if err := db.WriteLastAccessed(inst.ID, inst.LastAccessedAt); err != nil {
-			sessionLog.Debug("last_accessed_persist_failed",
-				slog.String("instance", inst.ID),
-				slog.String("error", err.Error()),
-			)
-		}
+	if err := inst.withOwningStateDB(func(db *statedb.StateDB) error {
+		return db.WriteLastAccessed(inst.ID, inst.LastAccessedAt)
+	}); err != nil && !errors.Is(err, errNoStateDB) {
+		sessionLog.Debug("last_accessed_persist_failed",
+			slog.String("instance", inst.ID),
+			slog.String("error", err.Error()),
+		)
 	}
 }
 
@@ -7877,31 +7877,18 @@ func (i *Instance) bindCodexSessionFromHook(sessionID, hookEvent string) error {
 	// producing a runaway loop of fresh "rebind" decisions on every
 	// poll. WriteCodexSessionBinding rewrites only the typed schema
 	// fields via json_set, leaving every other tool_data key untouched.
-	db := i.restartDB.Load()
-	if db == nil {
-		db = statedb.GetGlobal()
-	}
 	detectedAt := time.Now()
-	if db != nil {
-		err := db.WriteCodexSessionBinding(i.ID, sessionID, detectedAt)
-		// Web mutators save live instances through a short-lived Storage,
-		// which can leave restartDB closed. Retry through the saved owning
-		// path, never through an unrelated profile's global database.
-		if err != nil && db.DB().Ping() != nil && i.storageSnapshot != nil && i.storageSnapshot.dbPath != "" {
-			var retryDB *statedb.StateDB
-			retryDB, err = statedb.Open(i.storageSnapshot.dbPath)
-			if err == nil {
-				err = retryDB.WriteCodexSessionBinding(i.ID, sessionID, detectedAt)
-				_ = retryDB.Close()
-			}
-		}
-		if err != nil {
-			sessionLog.Warn("codex_session_rebind_persist_failed",
-				slog.String("instance_id", i.ID),
-				slog.String("new_id", sessionID),
-				slog.String("error", err.Error()))
-			return err
-		}
+	// Web mutators save live instances through a short-lived Storage, which
+	// can leave the owning handle closed; withOwningStateDB reopens the owning
+	// path then, never an unrelated profile's global database.
+	if err := i.withOwningStateDB(func(db *statedb.StateDB) error {
+		return db.WriteCodexSessionBinding(i.ID, sessionID, detectedAt)
+	}); err != nil && !errors.Is(err, errNoStateDB) {
+		sessionLog.Warn("codex_session_rebind_persist_failed",
+			slog.String("instance_id", i.ID),
+			slog.String("new_id", sessionID),
+			slog.String("error", err.Error()))
+		return err
 	}
 	i.CodexSessionID = sessionID
 	i.recordCodexOwnership(sessionID)
@@ -7942,13 +7929,13 @@ func (i *Instance) bindGeminiSessionFromHook(sessionID, hookEvent string) {
 	// row and clobbering this instance's in-memory state. The targeted
 	// json_set UPDATE atomically rewrites only $.gemini_session_id and
 	// $.gemini_detected_at, preserving the rest of tool_data.
-	if db := statedb.GetGlobal(); db != nil {
-		if err := db.WriteGeminiSessionBinding(i.ID, sessionID, i.GeminiDetectedAt); err != nil {
-			sessionLog.Warn("gemini_session_rebind_persist_failed",
-				slog.String("instance_id", i.ID),
-				slog.String("new_id", sessionID),
-				slog.String("error", err.Error()))
-		}
+	if err := i.withOwningStateDB(func(db *statedb.StateDB) error {
+		return db.WriteGeminiSessionBinding(i.ID, sessionID, i.GeminiDetectedAt)
+	}); err != nil && !errors.Is(err, errNoStateDB) {
+		sessionLog.Warn("gemini_session_rebind_persist_failed",
+			slog.String("instance_id", i.ID),
+			slog.String("new_id", sessionID),
+			slog.String("error", err.Error()))
 	}
 }
 
@@ -8616,12 +8603,13 @@ func (i *Instance) clearSessionBindingForFreshStart() {
 		i.GenericSessionCommand = ""
 		i.GenericSessionLocation = ""
 		i.genericSessionIDCleared = true
-		if db := statedb.GetGlobal(); db != nil {
-			// The flag above means a later save re-applies this clear, so the
-			// outcome is eventually right either way — but a write that keeps
-			// failing on a data path would otherwise never be visible, and
-			// this one deletes a binding the operator asked to be rid of.
-			err := db.WriteGenericSessionBinding(i.ID, "", "", "", "", time.Time{})
+		// The flag above means a later save re-applies this clear, so the
+		// outcome is eventually right either way — but a write that keeps
+		// failing on a data path would otherwise never be visible, and
+		// this one deletes a binding the operator asked to be rid of.
+		if err := i.withOwningStateDB(func(db *statedb.StateDB) error {
+			return db.WriteGenericSessionBinding(i.ID, "", "", "", "", time.Time{})
+		}); !errors.Is(err, errNoStateDB) {
 			i.setGenericSessionPersistError(err)
 			if err != nil {
 				sessionLog.Warn("generic_session_clear_persist_failed",
@@ -13178,15 +13166,18 @@ func (i *Instance) bindClaudeSessionFromHook(sessionID, hookSource, hookEvent, a
 	// synchronously here, not because clobbering is impossible — a
 	// later peer reload that observes the new ID will short-circuit at
 	// the `sessionID == i.ClaudeSessionID` check in UpdateHookStatus.
-	if db := statedb.GetGlobal(); db != nil {
-		if err := db.WriteClaudeSessionBinding(i.ID, sessionID, i.ClaudeDetectedAt); err != nil {
-			sessionLog.Warn("claude_session_rebind_persist_failed",
-				slog.String("instance_id", i.ID),
-				slog.String("new_id", sessionID),
-				slog.String("error", err.Error()))
-		} else {
-			i.linkedClaudeSessionID = sessionID
-		}
+	err := i.withOwningStateDB(func(db *statedb.StateDB) error {
+		return db.WriteClaudeSessionBinding(i.ID, sessionID, i.ClaudeDetectedAt)
+	})
+	switch {
+	case errors.Is(err, errNoStateDB):
+	case err != nil:
+		sessionLog.Warn("claude_session_rebind_persist_failed",
+			slog.String("instance_id", i.ID),
+			slog.String("new_id", sessionID),
+			slog.String("error", err.Error()))
+	default:
+		i.linkedClaudeSessionID = sessionID
 	}
 }
 
@@ -13201,11 +13192,11 @@ func (i *Instance) confirmClaudeSessionLink(sessionID, hookSource string) {
 	if sessionID == "" || i.linkedClaudeSessionID == sessionID {
 		return
 	}
-	db := statedb.GetGlobal()
-	if db == nil {
+	if err := i.withOwningStateDB(func(db *statedb.StateDB) error {
+		return db.UpsertSessionLink(i.ID, "claude", sessionID, "", true)
+	}); errors.Is(err, errNoStateDB) {
 		return
-	}
-	if err := db.UpsertSessionLink(i.ID, "claude", sessionID, "", true); err != nil {
+	} else if err != nil {
 		sessionLog.Warn("claude_session_link_confirm_failed",
 			slog.String("instance_id", i.ID),
 			slog.String("session_id", sessionID),
@@ -13224,11 +13215,13 @@ func (i *Instance) confirmClaudeSessionLink(sessionID, hookSource string) {
 // WriteClaudeSessionBinding and by confirmClaudeSessionLink; this is the
 // matching retraction.
 func (i *Instance) retractClaudeCandidateLink(candidate string) {
-	db := statedb.GetGlobal()
-	if db == nil || candidate == "" {
+	if candidate == "" {
 		return
 	}
-	if _, err := db.RetractSessionLink(i.ID, "claude", candidate); err != nil {
+	if err := i.withOwningStateDB(func(db *statedb.StateDB) error {
+		_, err := db.RetractSessionLink(i.ID, "claude", candidate)
+		return err
+	}); err != nil && !errors.Is(err, errNoStateDB) {
 		sessionLog.Warn("claude_session_link_retract_failed",
 			slog.String("instance_id", i.ID),
 			slog.String("candidate", candidate),
