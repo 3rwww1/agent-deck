@@ -3553,6 +3553,10 @@ func (i *Instance) detectCodexSessionAsync() {
 }
 
 func getCodexHomeDir() string {
+	return sandboxedToolDir("Codex home", getCodexHomeDirUnguarded())
+}
+
+func getCodexHomeDirUnguarded() string {
 	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
 		return ExpandPath(codexHome)
 	}
