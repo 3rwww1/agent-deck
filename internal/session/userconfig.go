@@ -153,6 +153,9 @@ type UserConfig struct {
 	// Claude defines Claude Code integration settings
 	Claude ClaudeSettings `toml:"claude,omitempty"`
 
+	// Sessions holds settings for how agent-deck looks after running sessions.
+	Sessions SessionsSettings `toml:"sessions,omitempty"`
+
 	// Profiles defines optional per-profile overrides.
 	// Example:
 	// [profiles.work.claude]
@@ -1215,6 +1218,45 @@ type ProfileSettings struct {
 	Costs *ProfileCosts `toml:"costs,omitempty"`
 	// Browser overrides [browser] for this profile ([profiles.<name>.browser]).
 	Browser *BrowserSettings `toml:"browser,omitempty"`
+	// Sessions overrides [sessions] for this profile ([profiles.<name>.sessions]).
+	Sessions SessionsSettings `toml:"sessions,omitempty"`
+}
+
+// SessionsSettings is the [sessions] section (and [profiles.<name>.sessions]).
+type SessionsSettings struct {
+	// AutoRefreshIdleBuilds restarts a Claude or Codex session onto a newer
+	// installed build of its tool once it sits idle at an empty prompt,
+	// resuming its conversation (see idle_build_refresh.go).
+	// Default: true (nil = true); the profile value wins over the global one.
+	AutoRefreshIdleBuilds *bool `toml:"auto_refresh_idle_builds,omitempty"`
+}
+
+// ConductorAutoRefreshIdleBuilds reports whether conductor name opted into
+// idle build refresh ([conductors.<name>.sessions] auto_refresh_idle_builds =
+// true). Default false: a restart cancels a conductor's in-Claude timers and
+// sends it a recovery turn.
+func (c *UserConfig) ConductorAutoRefreshIdleBuilds(name string) bool {
+	if c == nil || name == "" {
+		return false
+	}
+	v := c.Conductors[name].Sessions.AutoRefreshIdleBuilds
+	return v != nil && *v
+}
+
+// AutoRefreshIdleBuildsEnabled reports whether idle sessions of profile move
+// onto newer tool builds by themselves: [profiles.<profile>.sessions] first,
+// then [sessions], default true.
+func (c *UserConfig) AutoRefreshIdleBuildsEnabled(profile string) bool {
+	if c == nil {
+		return true
+	}
+	if p, ok := c.Profiles[profile]; ok && p.Sessions.AutoRefreshIdleBuilds != nil {
+		return *p.Sessions.AutoRefreshIdleBuilds
+	}
+	if c.Sessions.AutoRefreshIdleBuilds != nil {
+		return *c.Sessions.AutoRefreshIdleBuilds
+	}
+	return true
 }
 
 // ProfileClaudeSettings defines profile-specific Claude overrides.
@@ -1361,6 +1403,9 @@ type ConductorOverrides struct {
 	DeepSeek ConductorDeepSeekSettings `toml:"deepseek,omitempty"`
 	// Inbox overrides [inbox] for this conductor (issue #2469).
 	Inbox *InboxConfig `toml:"inbox,omitempty"`
+	// Sessions opts this conductor into [sessions] auto_refresh_idle_builds,
+	// which skips conductors unless this says true.
+	Sessions SessionsSettings `toml:"sessions,omitempty"`
 }
 
 // ConductorDeepSeekSettings defines conductor-specific DeepSeek Harness

@@ -654,6 +654,7 @@ type Instance struct {
 	claudeSupersededIDs         map[string]struct{}
 	hookLastUpdate              time.Time // When hook status was last received
 	linkedClaudeSessionID       string    // Last Claude id confirmClaudeSessionLink wrote a session_links row for
+	skipRecoveryTurn            bool      // SkipConductorRecoveryTurn: the next spawn sends no recovery turn
 	codexStartedGeneration      string
 	codexCompletedGeneration    string
 	codexStartedSessionID       string
@@ -10549,6 +10550,9 @@ func (i *Instance) RestartWithEnv(env map[string]string) error {
 func (i *Instance) restartRecorded(env map[string]string, sf telemetry.Surface) error {
 	err := i.restart(env)
 	if err == nil {
+		// LastStartedAt covers restarts too (its contract), so the idle
+		// build refresh sees a TUI restart as already on the new build.
+		i.markStarted()
 		i.RecordTelemetryEndFrom(telemetry.EndRestart, sf)
 	}
 	return err
