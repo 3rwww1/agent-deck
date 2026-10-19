@@ -10,8 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -22,7 +20,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/childenv"
 )
 
-// Each owning 2.x TUI restarts a stalled service, so lanes attach and only agent-deck recovers it.
+// Each owning 2.x TUI restarts a stalled service, so lanes attach to it and a stall is waited out: a restart drops every lane.
 
 const (
 	openCodeServiceHealthTTL     = 30 * time.Second
@@ -32,7 +30,7 @@ const (
 	openCodeServiceHealthTimeout = 2 * time.Second
 	openCodeServiceActionTimeout = 30 * time.Second
 	openCodeServiceLockName      = "opencode-service.lock"
-	// Each poll of a waiting lane is one opencode process; the limit leaves room for one stall restart.
+	// Each poll of a waiting lane is one opencode process; the limit outlasts a short stall.
 	openCodeServiceWaitPoll  = 5 * time.Second
 	openCodeServiceWaitLimit = openCodeServiceStallGrace + time.Minute
 )
@@ -42,7 +40,6 @@ type openCodeServiceGuard struct {
 	svc             openCodeService
 	healthyAt       time.Time
 	retryAt         time.Time
-	unhealthySince  time.Time
 	lastFailedAt    time.Time
 	requestSilentAt time.Time
 	disabled        bool
@@ -51,7 +48,7 @@ type openCodeServiceGuard struct {
 	now        func() time.Time
 	lockDir    func() (string, error)
 	status     func(binary string) (openCodeService, error)
-	run        func(binary, action string) error // "start" or "restart"
+	run        func(binary, action string) error // "start"
 	probe      func(svc openCodeService) error
 	registered func() (openCodeService, error)
 }
@@ -129,18 +126,9 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 		sessionLog.Debug("opencode_service_check_failed", slog.String("error", err.Error()))
 		return openCodeService{}, false
 	default:
-		// A stall usually clears by itself; failures further apart than the gap are separate outages.
-		now := g.now()
-		g.noteFailure(now)
-		if now.Sub(g.unhealthySince) < openCodeServiceStallGrace {
-			return openCodeService{}, false
-		}
-		// Another agent-deck process may have restarted it moments ago.
-		if last := lock.lastRestart(); !last.IsZero() && now.Sub(last) < openCodeServiceStallGrace {
-			return openCodeService{}, false
-		}
-		lock.recordRestart(now)
-		action = "restart"
+		// A stall clears by itself, and restarting the service drops every lane attached to it.
+		g.lastFailedAt = g.now()
+		return openCodeService{}, false
 	}
 
 	sessionLog.Warn("opencode_service_recover", slog.String("action", action))
@@ -178,7 +166,7 @@ func (g *openCodeServiceGuard) reportSilent() {
 	now := g.now()
 	g.healthyAt = time.Time{}
 	g.requestSilentAt = now
-	g.noteFailure(now)
+	g.lastFailedAt = now
 }
 
 func (g *openCodeServiceGuard) requestsRecentlySilent() bool {
@@ -192,27 +180,19 @@ func (g *openCodeServiceGuard) stalled() bool {
 	return !g.lastFailedAt.IsZero() && g.now().Sub(g.lastFailedAt) < openCodeServiceFailureGap
 }
 
-func (g *openCodeServiceGuard) noteFailure(now time.Time) {
-	if g.unhealthySince.IsZero() || now.Sub(g.lastFailedAt) > openCodeServiceFailureGap {
-		g.unhealthySince = now
-	}
-	g.lastFailedAt = now
-}
-
 func (g *openCodeServiceGuard) markHealthy(svc openCodeService) openCodeService {
 	g.svc = svc
 	g.healthyAt = g.now()
 	g.retryAt = time.Time{}
 	// An answered probe does not end a stall that session requests still report.
 	if g.requestSilentAt.IsZero() || g.healthyAt.Sub(g.requestSilentAt) > openCodeServiceFailureGap {
-		g.unhealthySince = time.Time{}
 		g.lastFailedAt = time.Time{}
 		g.requestSilentAt = time.Time{}
 	}
 	return svc
 }
 
-// openCodeServiceLock serializes recovery across processes and holds the last restart time.
+// openCodeServiceLock serializes recovery across processes.
 type openCodeServiceLock struct{ f *os.File }
 
 func (g *openCodeServiceGuard) lock() (*openCodeServiceLock, error) {
@@ -232,21 +212,6 @@ func (g *openCodeServiceGuard) lock() (*openCodeServiceLock, error) {
 		return nil, err
 	}
 	return &openCodeServiceLock{f: f}, nil
-}
-
-func (l *openCodeServiceLock) lastRestart() time.Time {
-	buf := make([]byte, 32)
-	n, _ := l.f.ReadAt(buf, 0)
-	unix, err := strconv.ParseInt(strings.TrimSpace(string(buf[:n])), 10, 64)
-	if err != nil || unix <= 0 {
-		return time.Time{}
-	}
-	return time.Unix(unix, 0)
-}
-
-func (l *openCodeServiceLock) recordRestart(at time.Time) {
-	_ = l.f.Truncate(0)
-	_, _ = l.f.WriteAt([]byte(strconv.FormatInt(at.Unix(), 10)), 0)
 }
 
 func (l *openCodeServiceLock) release() {

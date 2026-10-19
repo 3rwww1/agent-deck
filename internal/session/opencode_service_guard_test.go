@@ -111,25 +111,20 @@ func TestOpenCodeServiceGuard_StoppedServiceStartsOnce(t *testing.T) {
 	}
 }
 
-// A dozen lanes in two processes hit a stall: no restart within the grace, then exactly one.
-func TestOpenCodeServiceGuard_StallRestartsOnceAfterGrace(t *testing.T) {
+// A dozen lanes in two processes hit a long stall: none attaches, and nothing restarts the service under them.
+func TestOpenCodeServiceGuard_StallNeverRestarts(t *testing.T) {
 	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
 	lockDir := t.TempDir()
 	guards := []*openCodeServiceGuard{fake.guard(lockDir), fake.guard(lockDir)}
 
-	for elapsed := time.Duration(0); elapsed < openCodeServiceStallGrace; elapsed += 30 * time.Second {
+	for elapsed := time.Duration(0); elapsed < 10*openCodeServiceStallGrace; elapsed += 10 * time.Second {
 		if got := attachConcurrently(guards, 6); got != 0 {
 			t.Fatalf("attached %d lanes to a stalled service", got)
 		}
-		if got := fake.restarts.Load(); got != 0 {
-			t.Fatalf("restarted %d times %s into a stall, want none before %s", got, elapsed, openCodeServiceStallGrace)
-		}
-		fake.advance(30 * time.Second)
+		fake.advance(10 * time.Second)
 	}
-
-	attachConcurrently(guards, 6)
-	if got := fake.restarts.Load(); got != 1 {
-		t.Fatalf("restarts after the grace period = %d, want exactly 1", got)
+	if got := fake.restarts.Load(); got != 0 {
+		t.Fatalf("restarted a stalled service %d times, want 0: each restart drops every lane", got)
 	}
 }
 
@@ -151,22 +146,8 @@ func TestOpenCodeServiceGuard_StallThatClearsNeverRestarts(t *testing.T) {
 	}
 }
 
-// A frozen service is polled sparsely: lookups back off, so failures more than a minute apart are still one stall.
-func TestOpenCodeServiceGuard_SparselyPolledStallRestartsOnce(t *testing.T) {
-	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0)}
-	g := fake.guard(t.TempDir())
-
-	for elapsed := time.Duration(0); elapsed <= 2*openCodeServiceStallGrace; elapsed += 100 * time.Second {
-		g.attach("opencode")
-		fake.advance(100 * time.Second)
-	}
-	if got := fake.restarts.Load(); got != 1 {
-		t.Fatalf("restarts = %d, want 1 for a service silent for %s", got, 2*openCodeServiceStallGrace)
-	}
-}
-
 // A thrashing service can still answer its health route while every session request times out.
-func TestOpenCodeServiceGuard_SilentRequestsRestartAnsweringService(t *testing.T) {
+func TestOpenCodeServiceGuard_SilentRequestsNeverRestart(t *testing.T) {
 	release := make(chan struct{})
 	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		select {
@@ -188,8 +169,8 @@ func TestOpenCodeServiceGuard_SilentRequestsRestartAnsweringService(t *testing.T
 		cancel()
 		fake.advance(20 * time.Second)
 	}
-	if got := fake.restarts.Load(); got != 1 {
-		t.Fatalf("restarts = %d, want 1 for a service whose requests time out for %s", got, openCodeServiceStallGrace+time.Minute)
+	if got := fake.restarts.Load(); got != 0 {
+		t.Fatalf("restarts = %d, want 0 for a service whose requests time out for %s", got, openCodeServiceStallGrace+time.Minute)
 	}
 }
 
@@ -529,7 +510,7 @@ esac
 				total += seconds
 			}
 			if tc.answersAfter == 0 && time.Duration(total)*time.Second < openCodeServiceStallGrace {
-				t.Fatalf("wait gave up after %d s, before agent-deck restarts a stalled service (%s)", total, openCodeServiceStallGrace)
+				t.Fatalf("wait gave up after %d s, before a short stall clears (%s)", total, openCodeServiceStallGrace)
 			}
 			launched, _ := os.ReadFile(filepath.Join(dir, "launched"))
 			if got, want := strings.TrimSpace(string(launched)), "secret --server "+srv.URL+" -s ses_BOUND"; got != want {
