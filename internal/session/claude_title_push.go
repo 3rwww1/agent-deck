@@ -95,7 +95,7 @@ func withoutNameArgs(args []string) []string {
 		switch tok := args[k]; {
 		case tok == "--name" || tok == "-n":
 			k++
-		case strings.HasPrefix(tok, "--name=") || strings.HasPrefix(tok, "-n"):
+		case strings.HasPrefix(tok, "--name="):
 		default:
 			kept = append(kept, tok)
 		}

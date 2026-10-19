@@ -53,7 +53,8 @@ func TestNativeSessionNameReplacesStoredName(t *testing.T) {
 		{"long flag", "native_name_from_path=true", []string{"--model", "opus", "--name", "team/lane"}, []string{"--name", "team_lane", "--model", "opus"}},
 		{"short flag", "native_name_from_path=true", []string{"-n", "old"}, []string{"--name", "team_lane"}},
 		{"equals form", "native_name_from_path=true", []string{"--name=old"}, []string{"--name", "team_lane"}},
-		{"attached short", "native_name_from_path=true", []string{"-nold"}, []string{"--name", "team_lane"}},
+		// A token merely starting with -n is not stripped, so it keeps the name.
+		{"attached short", "native_name_from_path=true", []string{"-nold"}, []string{"-nold"}},
 		{"option off", "", []string{"--name", "mine"}, []string{"--name", "mine"}},
 		{"push_title off", "native_name_from_path=true\npush_title=false", []string{"--name", "mine"}, []string{"--name", "mine"}},
 	} {
@@ -63,6 +64,28 @@ func TestNativeSessionNameReplacesStoredName(t *testing.T) {
 			got := startupArgs(t, inst.buildClaudeExtraFlags(nil))
 			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
 				t.Fatalf("argv = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNativeSessionNameReplacesStoredNameOnFork(t *testing.T) {
+	for _, tc := range []struct{ name, title, want string }{
+		{"target named", "child", "--name team_child"},
+		// No path name for the target: the stored name must survive.
+		{"target unnamed", "a\nb", "--name old"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			startupNameConfig(t, "native_name_from_path=true")
+			parent := &Instance{Tool: "claude", Title: "lane", GroupPath: "team", ExtraArgs: []string{"--name", "old"}, ClaudeSessionID: "11111111-1111-4111-8111-111111111111", ClaudeDetectedAt: time.Now()}
+			parent.markClaudeSessionIDVerified()
+			target := &Instance{Tool: "claude", Title: tc.title, GroupPath: "team", ProjectPath: t.TempDir(), ExtraArgs: append([]string(nil), parent.ExtraArgs...)}
+			cmd, err := parent.buildClaudeForkCommandForTarget(target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(cmd, "--name") != 1 || !strings.Contains(cmd, tc.want) {
+				t.Fatalf("fork command = %s, want one %q", cmd, tc.want)
 			}
 		})
 	}
