@@ -3654,7 +3654,7 @@ func countByStatus(instances []*session.Instance, wantSubstate func(session.Stat
 	// counts them anyway, so its total silently exceeds `list --json`'s.
 	instances = session.VisibleInstances(instances)
 	// A count needs live status only; native session discovery belongs to the poller.
-	var pass session.StatusUpdatePass
+	pass := session.NewListingPass()
 	var counts statusCounts
 	var substates map[*session.Instance]session.Substate
 	if wantSubstate != nil {

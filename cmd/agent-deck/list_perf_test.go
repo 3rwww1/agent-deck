@@ -136,6 +136,97 @@ exit 1
 	}
 }
 
+func TestStatusJSON_AbsentRowsUseSocketInventory(t *testing.T) {
+	const perSocket = 10
+	sockets := []string{"status-absent-a", "status-absent-b"}
+	for _, args := range [][]string{{"--json"}, {"--json", "-v"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			sb := harness.NewSandbox(t)
+			profileDir := filepath.Join(sb.Home, ".agent-deck", "profiles", "default")
+			if err := os.MkdirAll(profileDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			db, err := statedb.Open(filepath.Join(profileDir, "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Migrate(); err != nil {
+				t.Fatal(err)
+			}
+			var rows []*statedb.InstanceRow
+			for _, sock := range sockets {
+				for n := 0; n < perSocket; n++ {
+					id := fmt.Sprintf("%s-%02d", sock, n)
+					status := "error"
+					if n%2 == 1 {
+						status = "stopped"
+					}
+					rows = append(rows, &statedb.InstanceRow{
+						ID: id, Title: id, ProjectPath: sb.Home, GroupPath: "my-sessions",
+						Tool: "shell", Status: status, TmuxSession: "agentdeck_" + id, TmuxSocketName: sock,
+						CreatedAt: time.Now().Add(-time.Hour), ToolData: json.RawMessage(`{}`),
+					})
+				}
+			}
+			if err := db.SaveInstances(rows); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			// Every server is live with one unrelated session; no stored row is on it.
+			shim := `#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/tmux-calls"
+case "$*" in *list-sessions*) printf 'agentdeck_live\n'; exit 0;; esac
+printf "can't find session\n" >&2
+exit 1
+`
+			if err := os.WriteFile(filepath.Join(sb.ShimDir, "tmux"), []byte(shim), 0700); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, sb.BinPath, append([]string{"status"}, args...)...)
+			cmd.Env = perfEnv(sb)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("status %v: %v\n%s", args, err, out)
+			}
+			var resp struct {
+				Error    int               `json:"error"`
+				Stopped  int               `json:"stopped"`
+				Total    int               `json:"total"`
+				Sessions []json.RawMessage `json:"sessions"`
+			}
+			if err := json.Unmarshal(out, &resp); err != nil {
+				t.Fatalf("status %v JSON: %v\n%s", args, err, out)
+			}
+			data, err := os.ReadFile(filepath.Join(sb.Home, "tmux-calls"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := strings.Split(strings.TrimSpace(string(data)), "\n")
+			probes, paneProbes := countCalls(calls, "has-session"), countCalls(calls, "pane_dead_status")
+			t.Logf("status %v over %d absent rows: tmux calls=%d has-session=%d pane-dead=%d", args, len(rows), len(calls), probes, paneProbes)
+			if resp.Total != len(rows) || resp.Error != len(rows)/2 || resp.Stopped != len(rows)/2 {
+				t.Errorf("total=%d error=%d stopped=%d, want %d with half error and half stopped", resp.Total, resp.Error, resp.Stopped, len(rows))
+			}
+			if slices.Contains(args, "-v") && len(resp.Sessions) != len(rows) {
+				t.Errorf("sessions=%d, want %d", len(resp.Sessions), len(rows))
+			}
+			for _, sock := range sockets {
+				if n := countCalls(calls, "-L "+sock+" ", "list-sessions"); n != 1 {
+					t.Errorf("socket %s inventories=%d, want 1", sock, n)
+				}
+			}
+			if probes != 0 || paneProbes != 0 {
+				t.Errorf("has-session=%d pane-dead probes=%d, want 0 and 0: the socket inventory answers absence", probes, paneProbes)
+			}
+		})
+	}
+}
+
 func listPerfFixture(t *testing.T) (*harness.Sandbox, []string, string) {
 	t.Helper()
 	tools := make([]string, 100)
