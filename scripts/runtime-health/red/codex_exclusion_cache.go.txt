@@ -7,9 +7,10 @@
 // status pass. With N active Codex sessions a sweep costs O(N^2) tmux
 // subprocesses, which is what TestPerf_RuntimeHealthCodex must reject.
 //
-// Keep the exported surface identical to codex_exclusion_cache.go:
-// StatusUpdatePass (UpdateStatus, UpdateStatusOnly, codexOwnership),
-// codexBootstrapMu, Instance.codexExclusions, Instance.recordCodexOwnership.
+// Keep every name other files use from codex_exclusion_cache.go:
+// StatusUpdatePass (UpdateStatus, UpdateStatusOnly, codexOwnership, and the
+// listing fields pinLiveness, liveMu, liveNames), codexBootstrapMu,
+// Instance.codexExclusions, Instance.recordCodexOwnership.
 package session
 
 import (
@@ -21,8 +22,13 @@ import (
 // Serialize fallback selection and claim publication, not authoritative probes.
 var codexBootstrapMu sync.Mutex
 
-// StatusUpdatePass carries no shared evidence on the red side.
-type StatusUpdatePass struct{}
+// StatusUpdatePass shares no ownership evidence on the red side.
+type StatusUpdatePass struct {
+	pinLiveness bool
+
+	liveMu    sync.Mutex
+	liveNames map[string]map[string]struct{}
+}
 
 // UpdateStatus refreshes one instance.
 func (p *StatusUpdatePass) UpdateStatus(i *Instance) error {
