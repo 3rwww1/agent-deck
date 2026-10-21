@@ -6936,7 +6936,7 @@ func (h *Home) backgroundStatusUpdate() {
 
 	tracker := h.getTransitionTracker()
 
-	var statusPass session.StatusUpdatePass
+	statusPass := session.NewListingPass()
 	g := new(errgroup.Group)
 	g.SetLimit(10) // Pool of 10 workers (tmux server serializes, more doesn't help)
 

@@ -43,7 +43,9 @@ type StatusUpdatePass struct {
 	mu       sync.Mutex
 	bySocket map[string]codexOwnershipSnapshot
 	loading  map[string]chan struct{}
-	// Guarded by mu: one socket listing per pass, nil when indeterminate.
+	// Apart from mu: the listing subprocess runs under it, so ownership lookups never wait.
+	liveMu sync.Mutex
+	// Guarded by liveMu: one socket listing per pass, nil when indeterminate.
 	liveNames map[string]map[string]struct{}
 }
 

@@ -517,7 +517,7 @@ func (s *SessionDataService) refreshStatuses(instances []*session.Instance) {
 		hooksByInstance = s.loadHookStatuses()
 	}
 
-	var statusPass session.StatusUpdatePass
+	statusPass := session.NewListingPass()
 	for _, inst := range instances {
 		if inst == nil {
 			continue

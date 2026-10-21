@@ -92,3 +92,58 @@ esac
 		}
 	}
 }
+
+// Stored-dead rows absent from their socket's listing cost no per-row probe.
+func TestBackgroundStatusPassAbsentRowsUseSocketInventory(t *testing.T) {
+	const n = 20
+	dir := t.TempDir()
+	t.Setenv("SWEEP_FIXTURE", dir)
+	h := newHomeForSnapshotTest()
+	for j := 0; j < n; j++ {
+		name := fmt.Sprintf("agentdeck_absent_pass_%d", j)
+		status := session.StatusError
+		if j%2 == 1 {
+			status = session.StatusStopped
+		}
+		inst := &session.Instance{ID: name, Title: name, Tool: "shell", Status: status, ProjectPath: dir, CreatedAt: time.Now().Add(-time.Hour)}
+		inst.SetTmuxSessionForTest(&tmux.Session{Name: name, SocketName: "status-pass-absent"})
+		h.instances = append(h.instances, inst)
+	}
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$SWEEP_FIXTURE/calls"
+case "$*" in *list-sessions*) printf 'agentdeck_live\n'; exit 0;; esac
+printf "can't find session\n" >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	tmux.ResetSocketSessionCacheForTest()
+	t.Cleanup(tmux.ResetSocketSessionCacheForTest)
+	tmux.ResetServerAliveCacheForTest(t)
+	h.backgroundStatusUpdate()
+	data, err := os.ReadFile(filepath.Join(dir, "calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := string(data)
+	probes, paneProbes := strings.Count(calls, "has-session"), strings.Count(calls, "pane_dead_status")
+	t.Logf("background sweep over %d absent rows: has-session=%d pane-dead=%d", n, probes, paneProbes)
+	// At least one: ExistsCached may also start a background listing of the socket.
+	if !strings.Contains(calls, "-L status-pass-absent list-sessions") {
+		t.Fatalf("no row consulted the socket listing:\n%s", calls)
+	}
+	if probes != 0 || paneProbes != 0 {
+		t.Errorf("has-session=%d pane-dead probes=%d, want 0 and 0: the socket inventory answers absence", probes, paneProbes)
+	}
+	for j, inst := range h.instances {
+		want := session.StatusError
+		if j%2 == 1 {
+			want = session.StatusStopped
+		}
+		if got := inst.GetStatusThreadSafe(); got != want {
+			t.Errorf("%s status=%s, want %s", inst.ID, got, want)
+		}
+	}
+}

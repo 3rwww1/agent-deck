@@ -6,7 +6,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
-// NewListingPass is for serial CLI listing loops only.
+// NewListingPass lists each socket once and trusts that listing for stored-dead rows.
 func NewListingPass() *StatusUpdatePass {
 	return &StatusUpdatePass{pinLiveness: true}
 }
@@ -100,8 +100,8 @@ func (p *StatusUpdatePass) sessionNames(socket string) (map[string]struct{}, boo
 // listSessionNames keys on the trimmed name, as tmuxArgs resolves -L.
 func (p *StatusUpdatePass) listSessionNames(socket string) (map[string]struct{}, bool) {
 	key := strings.TrimSpace(socket)
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.liveMu.Lock()
+	defer p.liveMu.Unlock()
 	if names, ok := p.liveNames[key]; ok {
 		return names, names != nil
 	}
