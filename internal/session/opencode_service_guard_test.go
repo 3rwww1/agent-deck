@@ -237,7 +237,7 @@ func TestOpenCodeServiceGuard_HealthyServiceIsProbedOncePerTTL(t *testing.T) {
 	if _, ok := g.attach("opencode"); ok {
 		t.Fatal("attached a lane to a silent service")
 	}
-	fake.advance(openCodeServiceRetryGap)
+	fake.advance(openCodeServiceStallBackoffBase)
 	fake.answer.Store(true)
 	for range 10 {
 		if _, ok := g.attach("opencode"); !ok {
@@ -355,10 +355,11 @@ func TestOpenCodeServiceGuard_HealthyProbeResetsTheBackoff(t *testing.T) {
 }
 
 // hangProbe makes the stub's probe block until release is closed and signals once a probe is in flight.
-func hangProbe(g *openCodeServiceGuard) (probing, release chan struct{}) {
+func hangProbe(f *stubOpenCodeService, g *openCodeServiceGuard) (probing, release chan struct{}) {
 	probing, release = make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	g.probe = func(openCodeService) error {
+		f.probes.Add(1)
 		once.Do(func() { close(probing) })
 		<-release
 		return errOpenCodeServiceSilent
@@ -370,7 +371,7 @@ func hangProbe(g *openCodeServiceGuard) (probing, release chan struct{}) {
 func TestOpenCodeServiceGuard_LockIsFreeDuringTheProbe(t *testing.T) {
 	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
 	g := fake.guard(t.TempDir())
-	probing, release := hangProbe(g)
+	probing, release := hangProbe(fake, g)
 
 	attached := make(chan bool, 1)
 	go func() {
@@ -402,7 +403,7 @@ func TestOpenCodeServiceGuard_LockIsFreeDuringTheProbe(t *testing.T) {
 func TestOpenCodeServiceGuard_KnownStallNeverWaitsOnTheProbe(t *testing.T) {
 	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
 	g := fake.guard(t.TempDir())
-	probing, release := hangProbe(g)
+	probing, release := hangProbe(fake, g)
 
 	// Cold: the second lane waits for the first probe and shares its failed verdict without probing itself.
 	first := make(chan bool, 1)
@@ -434,7 +435,7 @@ func TestOpenCodeServiceGuard_KnownStallNeverWaitsOnTheProbe(t *testing.T) {
 
 	// Stalled: the first lane re-probes after the backoff, the next one returns while that probe still hangs.
 	fake.advance(openCodeServiceStallBackoffBase)
-	probing, release = hangProbe(g)
+	probing, release = hangProbe(fake, g)
 	go func() {
 		_, ok := g.attach("opencode")
 		first <- ok
