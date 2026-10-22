@@ -272,8 +272,8 @@ func TestOpenCodeServiceGuard_RegisteredServiceSkipsTheCLI(t *testing.T) {
 	}
 }
 
-// A registered service that stops answering is re-probed every stall gap, and the CLI only runs once its process is gone.
-func TestOpenCodeServiceGuard_RegisteredStallBacksOffWithoutTheCLI(t *testing.T) {
+// A stall is re-probed at 15 s, 30 s, 60 s, then every 2 min, with no CLI until the registered process is gone.
+func TestOpenCodeServiceGuard_StallBacksOffExponentially(t *testing.T) {
 	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
 	g := fake.guard(t.TempDir())
 
@@ -282,21 +282,26 @@ func TestOpenCodeServiceGuard_RegisteredStallBacksOffWithoutTheCLI(t *testing.T)
 			t.Fatal("attached a lane to a silent service")
 		}
 	}
-	fake.advance(openCodeServiceStallGap - time.Second)
-	g.attach("opencode")
 	if got := fake.probes.Load(); got != 1 {
-		t.Fatalf("health probes = %d within the stall gap, want 1", got)
-	}
-	if got := fake.statuses.Load(); got != 0 {
-		t.Fatalf("service status asked %d times while the registered service stalled, want 0", got)
+		t.Fatalf("health probes = %d for five attaches in one sweep, want 1", got)
 	}
 	if !g.stalled() {
 		t.Fatal("a silent registered service does not count as stalled")
 	}
-	fake.advance(time.Second)
-	g.attach("opencode")
-	if got := fake.probes.Load(); got != 2 {
-		t.Fatalf("health probes = %d after the stall gap, want 2", got)
+	for i, wait := range []time.Duration{15 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 2 * time.Minute} {
+		fake.advance(wait - time.Second)
+		g.attach("opencode")
+		if got := fake.probes.Load(); got != int32(i+1) {
+			t.Fatalf("health probes = %d within wait %d (%s), want %d", got, i+1, wait, i+1)
+		}
+		fake.advance(time.Second)
+		g.attach("opencode")
+		if got := fake.probes.Load(); got != int32(i+2) {
+			t.Fatalf("health probes = %d after wait %d (%s), want %d", got, i+1, wait, i+2)
+		}
+	}
+	if got := fake.statuses.Load(); got != 0 {
+		t.Fatalf("service status asked %d times while the registered service stalled, want 0", got)
 	}
 
 	// The process dies: the registration no longer names it, and the CLI finds the service stopped and starts it.
@@ -304,7 +309,7 @@ func TestOpenCodeServiceGuard_RegisteredStallBacksOffWithoutTheCLI(t *testing.T)
 	fake.stopped = true
 	fake.mu.Unlock()
 	fake.answer.Store(true)
-	fake.advance(openCodeServiceStallGap)
+	fake.advance(openCodeServiceStallBackoffCap)
 	if _, ok := g.attach("opencode"); !ok {
 		t.Fatal("service restarted and answers but attach failed")
 	}
@@ -313,6 +318,77 @@ func TestOpenCodeServiceGuard_RegisteredStallBacksOffWithoutTheCLI(t *testing.T)
 	}
 	if got := fake.statuses.Load(); got == 0 {
 		t.Fatal("service status never asked after the registered process was gone")
+	}
+}
+
+// The first healthy probe ends the backoff: the next stall starts again at 15 s.
+func TestOpenCodeServiceGuard_HealthyProbeResetsTheBackoff(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
+	g := fake.guard(t.TempDir())
+
+	for _, wait := range []time.Duration{15 * time.Second, 30 * time.Second, time.Minute} {
+		g.attach("opencode")
+		fake.advance(wait)
+	}
+	fake.answer.Store(true)
+	if _, ok := g.attach("opencode"); !ok {
+		t.Fatal("service answers again but attach failed")
+	}
+	if g.stalled() {
+		t.Fatal("still stalled after a healthy probe")
+	}
+
+	fake.answer.Store(false)
+	fake.advance(openCodeServiceHealthTTL)
+	g.attach("opencode")
+	probes := fake.probes.Load()
+	fake.advance(openCodeServiceStallBackoffBase - time.Second)
+	g.attach("opencode")
+	if got := fake.probes.Load(); got != probes {
+		t.Fatalf("health probes = %d within the first wait of a new stall, want %d", got, probes)
+	}
+	fake.advance(time.Second)
+	g.attach("opencode")
+	if got := fake.probes.Load(); got != probes+1 {
+		t.Fatalf("health probes = %d after %s, want %d: the backoff did not reset", got, openCodeServiceStallBackoffBase, probes+1)
+	}
+}
+
+// A probe that hangs never blocks the guard's readers: the lock covers recorded state, not the network.
+func TestOpenCodeServiceGuard_LockIsFreeDuringTheProbe(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
+	g := fake.guard(t.TempDir())
+	probing := make(chan struct{})
+	release := make(chan struct{})
+	g.probe = func(openCodeService) error {
+		close(probing)
+		<-release
+		return errOpenCodeServiceSilent
+	}
+
+	attached := make(chan bool, 1)
+	go func() {
+		_, ok := g.attach("opencode")
+		attached <- ok
+	}()
+	<-probing
+
+	read := make(chan bool, 1)
+	go func() {
+		g.reportSilent()
+		read <- g.stalled()
+	}()
+	select {
+	case stalled := <-read:
+		if !stalled {
+			t.Fatal("reportSilent during the probe did not mark the service stalled")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("guard readers blocked behind a hanging probe")
+	}
+	close(release)
+	if ok := <-attached; ok {
+		t.Fatal("attached a lane to a silent service")
 	}
 }
 
@@ -400,7 +476,7 @@ func TestOpenCodeServiceGuard_SharesFailedVerdicts(t *testing.T) {
 		err    error
 		reused time.Duration
 	}{
-		{name: "silent", reused: openCodeServiceRetryGap},
+		{name: "silent", reused: openCodeServiceStallBackoffBase},
 		{name: "disabled", err: errOpenCodeServiceDisabled, reused: openCodeServiceHealthTTL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -497,7 +573,8 @@ func TestQueryOpenCodeSession_V2SkipsStandaloneWhileServiceHangs(t *testing.T) {
 
 	lookupFallsBack := func(phase string, wantCalls int) {
 		t.Helper()
-		fake.advance(openCodeServiceRetryGap)
+		// A stall is re-checked at the backoff base, the rest at the retry gap.
+		fake.advance(openCodeServiceStallBackoffBase)
 		if got := inst.queryOpenCodeSession(); got != "ses_BOUND" {
 			t.Fatalf("%s: session ID = %q, want ses_BOUND from the standalone lookup", phase, got)
 		}

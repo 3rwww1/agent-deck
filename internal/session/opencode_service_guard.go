@@ -27,24 +27,29 @@ const (
 	openCodeServiceStallGrace = 2 * time.Minute
 	openCodeServiceFailureGap = openCodeServiceStallGrace // lookups back off while the service hangs
 	openCodeServiceRetryGap   = 5 * time.Second
-	// A registered service that stops answering is probed over HTTP only, so the stall is paced slower than the CLI path.
-	openCodeServiceStallGap      = 30 * time.Second
-	openCodeServiceHealthTimeout = 2 * time.Second
-	openCodeServiceActionTimeout = 30 * time.Second
-	openCodeServiceLockName      = "opencode-service.lock"
+	// A stall is re-probed at 15 s, 30 s, 60 s, then every 2 min: the grace after which waiting lanes give up on it.
+	openCodeServiceStallBackoffBase = 15 * time.Second
+	openCodeServiceStallBackoffCap  = openCodeServiceStallGrace
+	openCodeServiceHealthTimeout    = 2 * time.Second
+	openCodeServiceActionTimeout    = 30 * time.Second
+	openCodeServiceLockName         = "opencode-service.lock"
 	// Each poll of a waiting lane is one opencode process; the limit outlasts a short stall.
 	openCodeServiceWaitPoll  = 5 * time.Second
 	openCodeServiceWaitLimit = openCodeServiceStallGrace + time.Minute
 )
 
+// mu covers the recorded state only: a check runs its lock file, process listing, probe, and CLI with mu released.
 type openCodeServiceGuard struct {
 	mu              sync.Mutex
+	checked         *sync.Cond // signals the end of the one check in flight
+	checking        bool
 	svc             openCodeService
 	healthyAt       time.Time
 	retryAt         time.Time
 	lastFailedAt    time.Time
 	requestSilentAt time.Time
 	disabled        bool
+	stalls          int          // silent probes in a row, paces the backoff
 	outages         atomic.Int64 // checks that found the service stopped or silent, read without waiting on a check in flight
 
 	now        func() time.Time
@@ -58,7 +63,7 @@ type openCodeServiceGuard struct {
 var sharedOpenCodeService = newOpenCodeServiceGuard()
 
 func newOpenCodeServiceGuard() *openCodeServiceGuard {
-	return &openCodeServiceGuard{
+	g := &openCodeServiceGuard{
 		now:        time.Now,
 		lockDir:    resolveLocksDirForSpawnLock,
 		status:     openCodeServiceStatus,
@@ -66,97 +71,143 @@ func newOpenCodeServiceGuard() *openCodeServiceGuard {
 		probe:      probeOpenCodeService,
 		registered: openCodeRegisteredService,
 	}
+	g.checked = sync.NewCond(&g.mu)
+	return g
 }
 
 // attach is false while the service is unreachable.
 func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	if !g.healthyAt.IsZero() && g.now().Sub(g.healthyAt) < openCodeServiceHealthTTL {
-		return g.svc, true
+	for {
+		if !g.healthyAt.IsZero() && g.now().Sub(g.healthyAt) < openCodeServiceHealthTTL {
+			g.mu.Unlock()
+			return g.svc, true
+		}
+		if g.now().Before(g.retryAt) {
+			g.mu.Unlock()
+			return openCodeService{}, false
+		}
+		if !g.checking {
+			break
+		}
+		// Lanes in one status sweep wait for the check in flight and share its verdict instead of each probing.
+		g.checked.Wait()
 	}
-	if g.now().Before(g.retryAt) {
-		return openCodeService{}, false
+	g.checking = true
+	g.mu.Unlock()
+
+	svc, ok := g.record(g.check(binary))
+
+	g.mu.Lock()
+	g.checking = false
+	g.checked.Broadcast()
+	if !ok {
+		if retry := g.now().Add(openCodeServiceRetryGap); retry.After(g.retryAt) {
+			g.retryAt = retry
+		}
 	}
-	if svc, ok := g.check(binary); ok {
-		return svc, true
-	}
-	// Lanes in one status sweep share a failed verdict instead of each probing.
-	if retry := g.now().Add(openCodeServiceRetryGap); retry.After(g.retryAt) {
-		g.retryAt = retry
-	}
-	return openCodeService{}, false
+	g.mu.Unlock()
+	return svc, ok
 }
 
-func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
+// checkOutcome is what one check saw, recorded under mu once every lock, listing, probe, and CLI call is done.
+type checkOutcome struct {
+	svc         openCodeService
+	err         error // the final verdict, nil for a service that answered
+	disabled    bool
+	stopped     bool // the first verdict was stopped, so a start was attempted
+	started     bool // the start ran, and svc and err come from the probe after it
+	probeSilent bool // the probe itself got no answer, apart from what session requests report
+}
+
+// check holds no guard lock: the lock file alone serializes recovery across processes.
+func (g *openCodeServiceGuard) check(binary string) checkOutcome {
 	lock, err := g.lock()
 	if err != nil {
 		sessionLog.Warn("opencode_service_lock_failed", slog.String("error", err.Error()))
-		return openCodeService{}, false
+		return checkOutcome{err: err}
 	}
 	defer lock.release()
 
 	// A live registered service is probed straight from its file: `opencode service status` boots a runtime per call.
 	svc, err := g.registered()
-	viaRegistration := err == nil
-	if !viaRegistration {
+	if err != nil {
 		// Only the CLI tells a stopped service from a disabled one, and starts it.
 		svc, err = g.status(binary)
 	}
-	g.disabled = errors.Is(err, errOpenCodeServiceDisabled)
-	probeSilent := false
+	out := checkOutcome{svc: svc, err: err, disabled: errors.Is(err, errOpenCodeServiceDisabled)}
 	if err == nil {
-		err = g.probe(svc)
-		probeSilent = errors.Is(err, errOpenCodeServiceSilent)
-		if err == nil && g.requestsRecentlySilent() {
-			// A thrashing service can answer the cheap health route while session requests hang.
-			err = errOpenCodeServiceSilent
-		}
-		if err == nil {
-			return g.markHealthy(svc), true
-		}
+		out.err = g.probe(svc)
+		out.probeSilent = errors.Is(out.err, errOpenCodeServiceSilent)
+		return out
+	}
+	if !errors.Is(err, errOpenCodeServiceStopped) {
+		return out
+	}
+	out.stopped = true
+	sessionLog.Warn("opencode_service_recover", slog.String("action", "start"))
+	if err := g.run(binary, "start"); err != nil {
+		sessionLog.Warn("opencode_service_recover_failed",
+			slog.String("action", "start"), slog.String("error", err.Error()))
+		return out
+	}
+	out.started = true
+	if out.svc, out.err = g.status(binary); out.err == nil {
+		out.err = g.probe(out.svc)
+	}
+	return out
+}
+
+func (g *openCodeServiceGuard) record(out checkOutcome) (openCodeService, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.disabled = out.disabled
+	err := out.err
+	if out.started {
+		g.requestSilentAt = time.Time{}
+	} else if err == nil && g.requestsRecentlySilent() {
+		// A thrashing service can answer the cheap health route while session requests hang.
+		err = errOpenCodeServiceSilent
 	}
 	// Only these drop the TUIs' connections; a rejected probe or a slow CLI leaves them be.
-	if errors.Is(err, errOpenCodeServiceStopped) || errors.Is(err, errOpenCodeServiceSilent) {
+	if out.stopped || errors.Is(err, errOpenCodeServiceSilent) {
 		g.outages.Add(1)
 	}
 	// With no service left to hang on, an earlier silence no longer makes calls skip the standalone CLI.
-	if errors.Is(err, errOpenCodeServiceStopped) || g.disabled {
+	if out.stopped || g.disabled {
 		g.lastFailedAt = time.Time{}
 	}
-
-	var action string
 	switch {
-	case errors.Is(err, errOpenCodeServiceStopped):
-		action = "start"
-	case errors.Is(err, errOpenCodeServiceDisabled):
+	case err == nil:
+		return g.markHealthy(out.svc), true
+	case out.stopped:
+		g.stalls = 0
+	case g.disabled:
+		g.stalls = 0
 		g.retryAt = g.now().Add(openCodeServiceHealthTTL)
-		return openCodeService{}, false
 	case !errors.Is(err, errOpenCodeServiceSilent):
 		// Only silence is a stall: a service that rejects the probe (a 401, a 503 while it boots) is up.
+		g.stalls = 0
 		sessionLog.Debug("opencode_service_check_failed", slog.String("error", err.Error()))
-		return openCodeService{}, false
 	default:
 		// A stall clears by itself, and restarting the service drops every lane attached to it.
 		g.lastFailedAt = g.now()
-		if viaRegistration && probeSilent {
-			// Without the CLI only the probe paces the stall; a probe that answered keeps the short gap.
-			g.retryAt = g.now().Add(openCodeServiceStallGap)
+		if out.probeSilent {
+			// Each silent probe doubles the wait; a probe that answered keeps the short gap.
+			g.stalls++
+			g.retryAt = g.now().Add(openCodeServiceStallBackoff(g.stalls))
 		}
-		return openCodeService{}, false
-	}
-
-	sessionLog.Warn("opencode_service_recover", slog.String("action", action))
-	if err := g.run(binary, action); err != nil {
-		sessionLog.Warn("opencode_service_recover_failed",
-			slog.String("action", action), slog.String("error", err.Error()))
-		return openCodeService{}, false
-	}
-	g.requestSilentAt = time.Time{}
-	if svc, err := g.status(binary); err == nil && g.probe(svc) == nil {
-		return g.markHealthy(svc), true
 	}
 	return openCodeService{}, false
+}
+
+// openCodeServiceStallBackoff is the wait after the n-th silent probe in a row.
+func openCodeServiceStallBackoff(n int) time.Duration {
+	wait := openCodeServiceStallBackoffBase
+	for ; n > 1 && wait < openCodeServiceStallBackoffCap; n-- {
+		wait *= 2
+	}
+	return min(wait, openCodeServiceStallBackoffCap)
 }
 
 // launchTarget also hands out a registered service that stopped answering, to wait on: a bare lane's own check would kill it.
@@ -199,6 +250,7 @@ func (g *openCodeServiceGuard) markHealthy(svc openCodeService) openCodeService 
 	g.svc = svc
 	g.healthyAt = g.now()
 	g.retryAt = time.Time{}
+	g.stalls = 0
 	// An answered probe does not end a stall that session requests still report.
 	if g.requestSilentAt.IsZero() || g.healthyAt.Sub(g.requestSilentAt) > openCodeServiceFailureGap {
 		g.lastFailedAt = time.Time{}
