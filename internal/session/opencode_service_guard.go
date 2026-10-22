@@ -23,10 +23,12 @@ import (
 // Each owning 2.x TUI restarts a stalled service, so lanes attach to it and a stall is waited out: a restart drops every lane.
 
 const (
-	openCodeServiceHealthTTL     = 30 * time.Second
-	openCodeServiceStallGrace    = 2 * time.Minute
-	openCodeServiceFailureGap    = openCodeServiceStallGrace // lookups back off while the service hangs
-	openCodeServiceRetryGap      = 5 * time.Second
+	openCodeServiceHealthTTL  = 30 * time.Second
+	openCodeServiceStallGrace = 2 * time.Minute
+	openCodeServiceFailureGap = openCodeServiceStallGrace // lookups back off while the service hangs
+	openCodeServiceRetryGap   = 5 * time.Second
+	// A registered service that stops answering is probed over HTTP only, so the stall is paced slower than the CLI path.
+	openCodeServiceStallGap      = 30 * time.Second
 	openCodeServiceHealthTimeout = 2 * time.Second
 	openCodeServiceActionTimeout = 30 * time.Second
 	openCodeServiceLockName      = "opencode-service.lock"
@@ -94,7 +96,13 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 	}
 	defer lock.release()
 
-	svc, err := g.status(binary)
+	// A live registered service is probed straight from its file: `opencode service status` boots a runtime per call.
+	svc, err := g.registered()
+	viaRegistration := err == nil
+	if !viaRegistration {
+		// Only the CLI tells a stopped service from a disabled one, and starts it.
+		svc, err = g.status(binary)
+	}
 	g.disabled = errors.Is(err, errOpenCodeServiceDisabled)
 	if err == nil {
 		if err = g.probe(svc); err == nil && g.requestsRecentlySilent() {
@@ -128,6 +136,10 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 	default:
 		// A stall clears by itself, and restarting the service drops every lane attached to it.
 		g.lastFailedAt = g.now()
+		if viaRegistration {
+			// Without the CLI only the probe paces the stall; the registration keeps naming the service to wait on.
+			g.retryAt = g.now().Add(openCodeServiceStallGap)
+		}
 		return openCodeService{}, false
 	}
 
