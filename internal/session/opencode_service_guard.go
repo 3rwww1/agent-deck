@@ -49,7 +49,7 @@ type openCodeServiceGuard struct {
 	lastFailedAt    time.Time
 	requestSilentAt time.Time
 	disabled        bool
-	stalls          int          // silent probes in a row, paces the backoff
+	stalls          int          // stalled probes in a row, paces the backoff
 	outages         atomic.Int64 // checks that found the service stopped or silent, read without waiting on a check in flight
 
 	now        func() time.Time
@@ -126,12 +126,12 @@ func (g *openCodeServiceGuard) checkOnce(binary string) (openCodeService, bool) 
 
 // checkOutcome is what one check saw, recorded under mu once every lock, listing, probe, and CLI call is done.
 type checkOutcome struct {
-	svc         openCodeService
-	err         error // the final verdict, nil for a service that answered
-	disabled    bool
-	stopped     bool // the first verdict was stopped, so a start was attempted
-	started     bool // the start ran, and svc and err come from the probe after it
-	probeSilent bool // the probe itself got no answer, apart from what session requests report
+	svc          openCodeService
+	err          error // the final verdict, nil for a service that answered
+	disabled     bool
+	stopped      bool // the first verdict was stopped, so a start was attempted
+	started      bool // the start ran, and svc and err come from the probe after it
+	probeStalled bool // the probe itself got no answer or no connection, apart from what session requests report
 }
 
 // check holds no guard lock: the lock file alone serializes recovery across processes.
@@ -145,21 +145,14 @@ func (g *openCodeServiceGuard) check(binary string) checkOutcome {
 
 	// A live registered service is probed straight from its file: `opencode service status` boots a runtime per call.
 	svc, err := g.registered()
-	if err == nil {
-		out := checkOutcome{svc: svc, err: g.probe(svc)}
-		if !errors.Is(out.err, errOpenCodeServiceUnreachable) {
-			out.probeSilent = errors.Is(out.err, errOpenCodeServiceSilent)
-			return out
-		}
-		// A live pid whose port refuses connections is a stale registration: only the CLI knows what the service is doing.
-		sessionLog.Debug("opencode_service_registration_stale", slog.String("error", out.err.Error()))
+	if err != nil {
+		// Only the CLI tells a stopped service from a disabled one, and starts it.
+		svc, err = g.status(binary)
 	}
-	// Only the CLI tells a stopped service from a disabled one, and starts it.
-	svc, err = g.status(binary)
 	out := checkOutcome{svc: svc, err: err, disabled: errors.Is(err, errOpenCodeServiceDisabled)}
 	if err == nil {
 		out.err = g.probe(svc)
-		out.probeSilent = errors.Is(out.err, errOpenCodeServiceSilent)
+		out.probeStalled = isOpenCodeServiceStall(out.err)
 		return out
 	}
 	if !errors.Is(err, errOpenCodeServiceStopped) {
@@ -191,7 +184,7 @@ func (g *openCodeServiceGuard) record(out checkOutcome) (openCodeService, bool) 
 		err = errOpenCodeServiceSilent
 	}
 	// Only these drop the TUIs' connections; a rejected probe or a slow CLI leaves them be.
-	if out.stopped || errors.Is(err, errOpenCodeServiceSilent) {
+	if out.stopped || isOpenCodeServiceStall(err) {
 		g.outages.Add(1)
 	}
 	// With no service left to hang on, an earlier silence no longer makes calls skip the standalone CLI.
@@ -206,14 +199,14 @@ func (g *openCodeServiceGuard) record(out checkOutcome) (openCodeService, bool) 
 	case g.disabled:
 		g.stalls = 0
 		g.retryAt = g.now().Add(openCodeServiceHealthTTL)
-	case !errors.Is(err, errOpenCodeServiceSilent):
-		// Only silence is a stall: a service that rejects the probe (a 401, a 503 while it boots) is up.
+	case !isOpenCodeServiceStall(err):
+		// A service that rejects the probe (a 401, a 503 while it boots) is up and is retried at the short gap.
 		g.stalls = 0
 		sessionLog.Debug("opencode_service_check_failed", slog.String("error", err.Error()))
 	default:
 		// A stall clears by itself, and restarting the service drops every lane attached to it.
 		g.lastFailedAt = g.now()
-		if !out.probeSilent {
+		if !out.probeStalled {
 			// The probe answered, so the backoff resets; only the session requests still hanging keep the short gap.
 			g.stalls = 0
 			break
@@ -224,7 +217,12 @@ func (g *openCodeServiceGuard) record(out checkOutcome) (openCodeService, bool) 
 	return openCodeService{}, false
 }
 
-// openCodeServiceStallBackoff is the wait after the n-th silent probe in a row.
+// isOpenCodeServiceStall is true for a probe that hung or found no listener; both leave a live pid nothing can attach to.
+func isOpenCodeServiceStall(err error) bool {
+	return errors.Is(err, errOpenCodeServiceSilent) || errors.Is(err, errOpenCodeServiceUnreachable)
+}
+
+// openCodeServiceStallBackoff is the wait after the n-th stalled probe in a row.
 func openCodeServiceStallBackoff(n int) time.Duration {
 	wait := openCodeServiceStallBackoffBase
 	for ; n > 1 && wait < openCodeServiceStallBackoffCap; n-- {
@@ -318,8 +316,9 @@ func runOpenCodeServiceAction(binary, action string) error {
 }
 
 var (
-	errOpenCodeServiceSilent      = errors.New("opencode background service did not answer its health probe")
-	errOpenCodeServiceStalled     = errors.New("opencode background service is stalled")
+	errOpenCodeServiceSilent  = errors.New("opencode background service did not answer its health probe")
+	errOpenCodeServiceStalled = errors.New("opencode background service is stalled")
+	// A live pid whose port refuses is a stall, not a stopped service: `opencode service status` re-reads the same registration, so the CLI has nothing to add, and the owning TUI restarts it.
 	errOpenCodeServiceUnreachable = errors.New("opencode background service refused its health probe")
 )
 
