@@ -205,7 +205,10 @@ func (g *openCodeServiceGuard) record(out checkOutcome) (openCodeService, bool) 
 		sessionLog.Debug("opencode_service_check_failed", slog.String("error", err.Error()))
 	default:
 		// A stall clears by itself, and restarting the service drops every lane attached to it.
-		g.lastFailedAt = g.now()
+		if errors.Is(err, errOpenCodeServiceSilent) {
+			// Only a hang gates the standalone CLI: a refused port says nothing about the host, so standalone calls keep running.
+			g.lastFailedAt = g.now()
+		}
 		if !out.probeStalled {
 			// The probe answered, so the backoff resets; only the session requests still hanging keep the short gap.
 			g.stalls = 0
@@ -260,7 +263,7 @@ func (g *openCodeServiceGuard) requestsRecentlySilent() bool {
 	return !g.requestSilentAt.IsZero() && g.now().Sub(g.requestSilentAt) < openCodeServiceHealthTTL
 }
 
-// stalled is true while the service went silent within the failure gap.
+// stalled is true while the service hung within the failure gap; a refused port backs off the probe without it.
 func (g *openCodeServiceGuard) stalled() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -318,7 +321,7 @@ func runOpenCodeServiceAction(binary, action string) error {
 var (
 	errOpenCodeServiceSilent  = errors.New("opencode background service did not answer its health probe")
 	errOpenCodeServiceStalled = errors.New("opencode background service is stalled")
-	// A live pid whose port refuses is a stall, not a stopped service: `opencode service status` re-reads the same registration, so the CLI has nothing to add, and the owning TUI restarts it.
+	// A live pid whose port refuses is backed off like a stall, not restarted: `opencode service status` re-reads the same registration, so the CLI has nothing to add, and the owning TUI restarts it.
 	errOpenCodeServiceUnreachable = errors.New("opencode background service refused its health probe")
 )
 

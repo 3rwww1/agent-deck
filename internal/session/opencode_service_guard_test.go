@@ -92,8 +92,8 @@ func (f *stubOpenCodeService) guard(lockDir string) *openCodeServiceGuard {
 	return g
 }
 
-// A live registration whose port refuses connections is a stall: no CLI runs, the probe backs off, and the service is attached once it answers.
-func TestOpenCodeServiceGuard_RefusedPortIsAStall(t *testing.T) {
+// A live registration whose port refuses connections backs off like a stall: no CLI runs, the probe waits longer each time, standalone calls keep running, and the service is attached once it answers.
+func TestOpenCodeServiceGuard_RefusedPortBacksOffWithoutGatingStandalone(t *testing.T) {
 	fake := &stubOpenCodeService{now: time.Now(), registered: true}
 	fake.refuses.Store(true)
 	g := fake.guard(t.TempDir())
@@ -101,8 +101,8 @@ func TestOpenCodeServiceGuard_RefusedPortIsAStall(t *testing.T) {
 	if _, ok := g.attach("opencode"); ok {
 		t.Fatal("refused port: attach succeeded")
 	}
-	if !g.stalled() {
-		t.Fatal("refused port: stalled() = false, want true")
+	if g.stalled() {
+		t.Fatal("refused port: stalled() = true, want false so standalone calls still run")
 	}
 	for i, step := range []time.Duration{15 * time.Second, 30 * time.Second, time.Minute} {
 		fake.advance(step - time.Second)
