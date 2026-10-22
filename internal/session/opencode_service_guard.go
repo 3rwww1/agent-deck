@@ -50,7 +50,7 @@ type openCodeServiceGuard struct {
 	requestSilentAt time.Time
 	disabled        bool
 	stalls          int          // stalled probes in a row, paces the backoff
-	outages         atomic.Int64 // checks that found the service stopped or silent, read without waiting on a check in flight
+	outages         atomic.Int64 // checks that found the service stopped, silent, or refusing, read without waiting on a check in flight
 
 	now        func() time.Time
 	lockDir    func() (string, error)

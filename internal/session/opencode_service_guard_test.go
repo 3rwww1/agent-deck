@@ -104,6 +104,9 @@ func TestOpenCodeServiceGuard_RefusedPortBacksOffWithoutGatingStandalone(t *test
 	if g.stalled() {
 		t.Fatal("refused port: stalled() = true, want false so standalone calls still run")
 	}
+	if got := g.outages.Load(); got != 1 {
+		t.Fatalf("outages after a refused probe = %d, want 1: the TUIs lost their connections", got)
+	}
 	for i, step := range []time.Duration{15 * time.Second, 30 * time.Second, time.Minute} {
 		fake.advance(step - time.Second)
 		if _, ok := g.attach("opencode"); ok || fake.probes.Load() != int32(i+1) {
