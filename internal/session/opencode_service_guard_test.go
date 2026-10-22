@@ -316,6 +316,26 @@ func TestOpenCodeServiceGuard_RegisteredStallBacksOffWithoutTheCLI(t *testing.T)
 	}
 }
 
+// A probe that answers while session requests report silence keeps the short gap: nothing hung on the lock.
+func TestOpenCodeServiceGuard_RegisteredRequestSilenceKeepsTheShortGap(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
+	fake.answer.Store(true)
+	g := fake.guard(t.TempDir())
+
+	g.reportSilent()
+	if _, ok := g.attach("opencode"); ok {
+		t.Fatal("attached a lane while session requests report silence")
+	}
+	fake.advance(openCodeServiceRetryGap)
+	g.attach("opencode")
+	if got := fake.probes.Load(); got != 2 {
+		t.Fatalf("health probes = %d after the retry gap, want 2: the answering probe is re-run at the short gap", got)
+	}
+	if got := fake.statuses.Load(); got != 0 {
+		t.Fatalf("service status asked %d times, want 0", got)
+	}
+}
+
 // SSE reconnects reuse the guard's checked service instead of asking the binary each time.
 func TestResolveOpenCodeService_ReconnectsReuseHealthyService(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -534,6 +554,8 @@ func TestBuildOpenCodeCommand_V2WaitsForSilentRegisteredService(t *testing.T) {
 		{name: "registered, never answers", pid: os.Getpid(), wantWait: true},
 		{name: "not registered", pid: 0},
 		{name: "disabled", pid: 0, disabled: true},
+		// The setting gates starting, not attaching: a live registered process is waited on like any other.
+		{name: "disabled, registered process alive", pid: os.Getpid(), disabled: true, wantWait: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

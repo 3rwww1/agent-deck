@@ -104,8 +104,11 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 		svc, err = g.status(binary)
 	}
 	g.disabled = errors.Is(err, errOpenCodeServiceDisabled)
+	probeSilent := false
 	if err == nil {
-		if err = g.probe(svc); err == nil && g.requestsRecentlySilent() {
+		err = g.probe(svc)
+		probeSilent = errors.Is(err, errOpenCodeServiceSilent)
+		if err == nil && g.requestsRecentlySilent() {
 			// A thrashing service can answer the cheap health route while session requests hang.
 			err = errOpenCodeServiceSilent
 		}
@@ -136,8 +139,8 @@ func (g *openCodeServiceGuard) check(binary string) (openCodeService, bool) {
 	default:
 		// A stall clears by itself, and restarting the service drops every lane attached to it.
 		g.lastFailedAt = g.now()
-		if viaRegistration {
-			// Without the CLI only the probe paces the stall; the registration keeps naming the service to wait on.
+		if viaRegistration && probeSilent {
+			// Without the CLI only the probe paces the stall; a probe that answered keeps the short gap.
 			g.retryAt = g.now().Add(openCodeServiceStallGap)
 		}
 		return openCodeService{}, false
