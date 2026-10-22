@@ -145,10 +145,17 @@ func (g *openCodeServiceGuard) check(binary string) checkOutcome {
 
 	// A live registered service is probed straight from its file: `opencode service status` boots a runtime per call.
 	svc, err := g.registered()
-	if err != nil {
-		// Only the CLI tells a stopped service from a disabled one, and starts it.
-		svc, err = g.status(binary)
+	if err == nil {
+		out := checkOutcome{svc: svc, err: g.probe(svc)}
+		if !errors.Is(out.err, errOpenCodeServiceUnreachable) {
+			out.probeSilent = errors.Is(out.err, errOpenCodeServiceSilent)
+			return out
+		}
+		// A live pid whose port refuses connections is a stale registration: only the CLI knows what the service is doing.
+		sessionLog.Debug("opencode_service_registration_stale", slog.String("error", out.err.Error()))
 	}
+	// Only the CLI tells a stopped service from a disabled one, and starts it.
+	svc, err = g.status(binary)
 	out := checkOutcome{svc: svc, err: err, disabled: errors.Is(err, errOpenCodeServiceDisabled)}
 	if err == nil {
 		out.err = g.probe(svc)
@@ -311,8 +318,9 @@ func runOpenCodeServiceAction(binary, action string) error {
 }
 
 var (
-	errOpenCodeServiceSilent  = errors.New("opencode background service did not answer its health probe")
-	errOpenCodeServiceStalled = errors.New("opencode background service is stalled")
+	errOpenCodeServiceSilent      = errors.New("opencode background service did not answer its health probe")
+	errOpenCodeServiceStalled     = errors.New("opencode background service is stalled")
+	errOpenCodeServiceUnreachable = errors.New("opencode background service refused its health probe")
 )
 
 // probeOpenCodeService makes the same probe an attached TUI makes before it starts.
@@ -331,7 +339,7 @@ func probeOpenCodeService(svc openCodeService) error {
 		if ctx.Err() != nil {
 			return errOpenCodeServiceSilent
 		}
-		return err
+		return fmt.Errorf("%w: %w", errOpenCodeServiceUnreachable, err)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

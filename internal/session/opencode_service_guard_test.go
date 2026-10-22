@@ -25,6 +25,7 @@ type stubOpenCodeService struct {
 	statuses   atomic.Int32
 	answer     atomic.Bool
 	rejects    atomic.Bool // answers the probe with an error instead of staying silent
+	refuses    atomic.Bool // refuses the connection while stopped, like a dead port behind a live registration
 	probes     atomic.Int32
 	starts     atomic.Int32
 	restarts   atomic.Int32
@@ -34,6 +35,12 @@ func (f *stubOpenCodeService) clock() time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.now
+}
+
+func (f *stubOpenCodeService) isStopped() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopped
 }
 
 func (f *stubOpenCodeService) advance(d time.Duration) {
@@ -79,6 +86,8 @@ func (f *stubOpenCodeService) guard(lockDir string) *openCodeServiceGuard {
 	g.probe = func(openCodeService) error {
 		f.probes.Add(1)
 		switch {
+		case f.refuses.Load() && f.isStopped():
+			return fmt.Errorf("%w: dial tcp 127.0.0.1:49374: connect: connection refused", errOpenCodeServiceUnreachable)
 		case f.answer.Load():
 			return nil
 		case f.rejects.Load():
@@ -87,6 +96,31 @@ func (f *stubOpenCodeService) guard(lockDir string) *openCodeServiceGuard {
 		return errOpenCodeServiceSilent
 	}
 	return g
+}
+
+// A registration whose pid is alive but whose port refuses connections is stale: the check reaches the CLI, which starts the service.
+func TestOpenCodeServiceGuard_RefusedPortFallsBackToTheCLI(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Now(), stopped: true}
+	fake.refuses.Store(true)
+	fake.answer.Store(true)
+	g := fake.guard(t.TempDir())
+	// The registration file still names a live pid while the CLI already sees the service stopped.
+	g.registered = func() (openCodeService, error) {
+		return openCodeService{URL: "http://127.0.0.1:49374", Password: "secret"}, nil
+	}
+
+	if _, ok := g.attach("opencode"); !ok {
+		t.Fatal("refused port: attach failed, want the CLI to start the service")
+	}
+	if got := fake.starts.Load(); got != 1 {
+		t.Fatalf("starts = %d, want 1", got)
+	}
+	if got := fake.statuses.Load(); got != 2 {
+		t.Fatalf("CLI status calls = %d, want 2 (the fallback and the one after the start)", got)
+	}
+	if got := fake.probes.Load(); got != 2 {
+		t.Fatalf("health probes = %d, want 2 (refused, then answered)", got)
+	}
 }
 
 func attachConcurrently(guards []*openCodeServiceGuard, perGuard int) (attached int32) {
@@ -222,10 +256,11 @@ func TestProbeOpenCodeService_TellsSilenceFromRejection(t *testing.T) {
 	if err := probeOpenCodeService(openCodeService{URL: silent.URL}); !errors.Is(err, errOpenCodeServiceSilent) {
 		t.Fatalf("silent service: probe = %v, want %v", err, errOpenCodeServiceSilent)
 	}
-	for name, url := range map[string]string{"401": rejecting.URL, "refused": refused.URL} {
-		if err := probeOpenCodeService(openCodeService{URL: url}); err == nil || errors.Is(err, errOpenCodeServiceSilent) {
-			t.Fatalf("%s: probe = %v, want an error that is not silence", name, err)
-		}
+	if err := probeOpenCodeService(openCodeService{URL: rejecting.URL}); err == nil || errors.Is(err, errOpenCodeServiceSilent) || errors.Is(err, errOpenCodeServiceUnreachable) {
+		t.Fatalf("401: probe = %v, want a rejection that is neither silence nor a refused connection", err)
+	}
+	if err := probeOpenCodeService(openCodeService{URL: refused.URL}); !errors.Is(err, errOpenCodeServiceUnreachable) {
+		t.Fatalf("refused: probe = %v, want %v", err, errOpenCodeServiceUnreachable)
 	}
 }
 
