@@ -272,7 +272,7 @@ func TestOpenCodeServiceGuard_RegisteredServiceSkipsTheCLI(t *testing.T) {
 	}
 }
 
-// A stall is re-probed at 15 s, 30 s, 60 s, then every 2 min, with no CLI until the registered process is gone.
+// A stall is re-probed at 15 s, 30 s, then every minute, with no CLI until the registered process is gone.
 func TestOpenCodeServiceGuard_StallBacksOffExponentially(t *testing.T) {
 	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
 	g := fake.guard(t.TempDir())
@@ -288,7 +288,7 @@ func TestOpenCodeServiceGuard_StallBacksOffExponentially(t *testing.T) {
 	if !g.stalled() {
 		t.Fatal("a silent registered service does not count as stalled")
 	}
-	for i, wait := range []time.Duration{15 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 2 * time.Minute} {
+	for i, wait := range []time.Duration{15 * time.Second, 30 * time.Second, time.Minute, time.Minute, time.Minute} {
 		fake.advance(wait - time.Second)
 		g.attach("opencode")
 		if got := fake.probes.Load(); got != int32(i+1) {
@@ -354,17 +354,23 @@ func TestOpenCodeServiceGuard_HealthyProbeResetsTheBackoff(t *testing.T) {
 	}
 }
 
+// hangProbe makes the stub's probe block until release is closed and signals once a probe is in flight.
+func hangProbe(g *openCodeServiceGuard) (probing, release chan struct{}) {
+	probing, release = make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	g.probe = func(openCodeService) error {
+		once.Do(func() { close(probing) })
+		<-release
+		return errOpenCodeServiceSilent
+	}
+	return probing, release
+}
+
 // A probe that hangs never blocks the guard's readers: the lock covers recorded state, not the network.
 func TestOpenCodeServiceGuard_LockIsFreeDuringTheProbe(t *testing.T) {
 	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
 	g := fake.guard(t.TempDir())
-	probing := make(chan struct{})
-	release := make(chan struct{})
-	g.probe = func(openCodeService) error {
-		close(probing)
-		<-release
-		return errOpenCodeServiceSilent
-	}
+	probing, release := hangProbe(g)
 
 	attached := make(chan bool, 1)
 	go func() {
@@ -388,6 +394,66 @@ func TestOpenCodeServiceGuard_LockIsFreeDuringTheProbe(t *testing.T) {
 	}
 	close(release)
 	if ok := <-attached; ok {
+		t.Fatal("attached a lane to a silent service")
+	}
+}
+
+// Lanes wait for a cold check and share its verdict; once a stall is on record they return at once instead.
+func TestOpenCodeServiceGuard_KnownStallNeverWaitsOnTheProbe(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
+	g := fake.guard(t.TempDir())
+	probing, release := hangProbe(g)
+
+	// Cold: the second lane waits for the first probe and shares its failed verdict without probing itself.
+	first := make(chan bool, 1)
+	go func() {
+		_, ok := g.attach("opencode")
+		first <- ok
+	}()
+	<-probing
+	second := make(chan bool, 1)
+	go func() {
+		_, ok := g.attach("opencode")
+		second <- ok
+	}()
+	select {
+	case <-second:
+		t.Fatal("a lane returned before the cold check in flight finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if <-first || <-second {
+		t.Fatal("attached a lane to a silent service")
+	}
+	if got := fake.probes.Load(); got != 1 {
+		t.Fatalf("health probes = %d for two cold lanes, want 1", got)
+	}
+	if !g.stalled() {
+		t.Fatal("a silent probe did not record a stall")
+	}
+
+	// Stalled: the first lane re-probes after the backoff, the next one returns while that probe still hangs.
+	fake.advance(openCodeServiceStallBackoffBase)
+	probing, release = hangProbe(g)
+	go func() {
+		_, ok := g.attach("opencode")
+		first <- ok
+	}()
+	<-probing
+	go func() {
+		_, ok := g.attach("opencode")
+		second <- ok
+	}()
+	select {
+	case ok := <-second:
+		if ok {
+			t.Fatal("attached a lane to a stalled service")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a lane waited on the probe of a service it already knew was stalled")
+	}
+	close(release)
+	if <-first {
 		t.Fatal("attached a lane to a silent service")
 	}
 }

@@ -27,9 +27,9 @@ const (
 	openCodeServiceStallGrace = 2 * time.Minute
 	openCodeServiceFailureGap = openCodeServiceStallGrace // lookups back off while the service hangs
 	openCodeServiceRetryGap   = 5 * time.Second
-	// A stall is re-probed at 15 s, 30 s, 60 s, then every 2 min: the grace after which waiting lanes give up on it.
+	// A stall is re-probed at 15 s, 30 s, then every minute: one probe a minute is cheap, and a service that answers again is attached within it.
 	openCodeServiceStallBackoffBase = 15 * time.Second
-	openCodeServiceStallBackoffCap  = openCodeServiceStallGrace
+	openCodeServiceStallBackoffCap  = time.Minute
 	openCodeServiceHealthTimeout    = 2 * time.Second
 	openCodeServiceActionTimeout    = 30 * time.Second
 	openCodeServiceLockName         = "opencode-service.lock"
@@ -90,17 +90,20 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 		if !g.checking {
 			break
 		}
-		// Lanes in one status sweep wait for the check in flight and share its verdict instead of each probing.
+		if !g.lastFailedAt.IsZero() {
+			// A lane that already knows the service stalled does not wait on the probe in flight.
+			g.mu.Unlock()
+			return openCodeService{}, false
+		}
+		// Lanes in one status sweep wait for the cold check in flight and share its verdict instead of each probing.
 		g.checked.Wait()
 	}
 	g.checking = true
 	g.mu.Unlock()
 
-	svc, ok := g.record(g.check(binary))
+	svc, ok := g.checkOnce(binary)
 
 	g.mu.Lock()
-	g.checking = false
-	g.checked.Broadcast()
 	if !ok {
 		if retry := g.now().Add(openCodeServiceRetryGap); retry.After(g.retryAt) {
 			g.retryAt = retry
@@ -108,6 +111,17 @@ func (g *openCodeServiceGuard) attach(binary string) (openCodeService, bool) {
 	}
 	g.mu.Unlock()
 	return svc, ok
+}
+
+// checkOnce clears the in-flight flag however check ends, so a panic never wedges every later attach.
+func (g *openCodeServiceGuard) checkOnce(binary string) (openCodeService, bool) {
+	defer func() {
+		g.mu.Lock()
+		g.checking = false
+		g.checked.Broadcast()
+		g.mu.Unlock()
+	}()
+	return g.record(g.check(binary))
 }
 
 // checkOutcome is what one check saw, recorded under mu once every lock, listing, probe, and CLI call is done.
@@ -192,11 +206,13 @@ func (g *openCodeServiceGuard) record(out checkOutcome) (openCodeService, bool) 
 	default:
 		// A stall clears by itself, and restarting the service drops every lane attached to it.
 		g.lastFailedAt = g.now()
-		if out.probeSilent {
-			// Each silent probe doubles the wait; a probe that answered keeps the short gap.
-			g.stalls++
-			g.retryAt = g.now().Add(openCodeServiceStallBackoff(g.stalls))
+		if !out.probeSilent {
+			// The probe answered, so the backoff resets; only the session requests still hanging keep the short gap.
+			g.stalls = 0
+			break
 		}
+		g.stalls++
+		g.retryAt = g.now().Add(openCodeServiceStallBackoff(g.stalls))
 	}
 	return openCodeService{}, false
 }
