@@ -18,14 +18,16 @@ import (
 )
 
 type stubOpenCodeService struct {
-	mu       sync.Mutex
-	now      time.Time
-	stopped  bool
-	answer   atomic.Bool
-	rejects  atomic.Bool // answers the probe with an error instead of staying silent
-	probes   atomic.Int32
-	starts   atomic.Int32
-	restarts atomic.Int32
+	mu         sync.Mutex
+	now        time.Time
+	stopped    bool
+	registered bool // the registration file names a live process
+	statuses   atomic.Int32
+	answer     atomic.Bool
+	rejects    atomic.Bool // answers the probe with an error instead of staying silent
+	probes     atomic.Int32
+	starts     atomic.Int32
+	restarts   atomic.Int32
 }
 
 func (f *stubOpenCodeService) clock() time.Time {
@@ -46,9 +48,18 @@ func (f *stubOpenCodeService) guard(lockDir string) *openCodeServiceGuard {
 	g.now = f.clock
 	g.lockDir = func() (string, error) { return lockDir, nil }
 	g.status = func(string) (openCodeService, error) {
+		f.statuses.Add(1)
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if f.stopped {
+			return openCodeService{}, errOpenCodeServiceStopped
+		}
+		return openCodeService{URL: "http://127.0.0.1:49374", Password: "secret"}, nil
+	}
+	g.registered = func() (openCodeService, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !f.registered || f.stopped {
 			return openCodeService{}, errOpenCodeServiceStopped
 		}
 		return openCodeService{URL: "http://127.0.0.1:49374", Password: "secret"}, nil
@@ -240,6 +251,88 @@ func TestOpenCodeServiceGuard_HealthyServiceIsProbedOncePerTTL(t *testing.T) {
 	g.attach("opencode")
 	if got := fake.probes.Load(); got != 3 {
 		t.Fatalf("health probes = %d, want 3 after the TTL", got)
+	}
+}
+
+// A registered service is probed from its file: no `opencode service status` runtime boots for it.
+func TestOpenCodeServiceGuard_RegisteredServiceSkipsTheCLI(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
+	fake.answer.Store(true)
+	g := fake.guard(t.TempDir())
+
+	svc, ok := g.attach("opencode")
+	if !ok || svc.URL != "http://127.0.0.1:49374" || svc.Password != "secret" {
+		t.Fatalf("attach = %+v, %v, want the registered service", svc, ok)
+	}
+	if got := fake.statuses.Load(); got != 0 {
+		t.Fatalf("service status asked %d times for a live registered service, want 0", got)
+	}
+	if got := fake.probes.Load(); got != 1 {
+		t.Fatalf("health probes = %d, want 1", got)
+	}
+}
+
+// A registered service that stops answering is re-probed every stall gap, and the CLI only runs once its process is gone.
+func TestOpenCodeServiceGuard_RegisteredStallBacksOffWithoutTheCLI(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
+	g := fake.guard(t.TempDir())
+
+	for range 5 {
+		if _, ok := g.attach("opencode"); ok {
+			t.Fatal("attached a lane to a silent service")
+		}
+	}
+	fake.advance(openCodeServiceStallGap - time.Second)
+	g.attach("opencode")
+	if got := fake.probes.Load(); got != 1 {
+		t.Fatalf("health probes = %d within the stall gap, want 1", got)
+	}
+	if got := fake.statuses.Load(); got != 0 {
+		t.Fatalf("service status asked %d times while the registered service stalled, want 0", got)
+	}
+	if !g.stalled() {
+		t.Fatal("a silent registered service does not count as stalled")
+	}
+	fake.advance(time.Second)
+	g.attach("opencode")
+	if got := fake.probes.Load(); got != 2 {
+		t.Fatalf("health probes = %d after the stall gap, want 2", got)
+	}
+
+	// The process dies: the registration no longer names it, and the CLI finds the service stopped and starts it.
+	fake.mu.Lock()
+	fake.stopped = true
+	fake.mu.Unlock()
+	fake.answer.Store(true)
+	fake.advance(openCodeServiceStallGap)
+	if _, ok := g.attach("opencode"); !ok {
+		t.Fatal("service restarted and answers but attach failed")
+	}
+	if got := fake.starts.Load(); got != 1 {
+		t.Fatalf("starts = %d, want 1 once the registered process was gone", got)
+	}
+	if got := fake.statuses.Load(); got == 0 {
+		t.Fatal("service status never asked after the registered process was gone")
+	}
+}
+
+// A probe that answers while session requests report silence keeps the short gap: nothing hung on the lock.
+func TestOpenCodeServiceGuard_RegisteredRequestSilenceKeepsTheShortGap(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true}
+	fake.answer.Store(true)
+	g := fake.guard(t.TempDir())
+
+	g.reportSilent()
+	if _, ok := g.attach("opencode"); ok {
+		t.Fatal("attached a lane while session requests report silence")
+	}
+	fake.advance(openCodeServiceRetryGap)
+	g.attach("opencode")
+	if got := fake.probes.Load(); got != 2 {
+		t.Fatalf("health probes = %d after the retry gap, want 2: the answering probe is re-run at the short gap", got)
+	}
+	if got := fake.statuses.Load(); got != 0 {
+		t.Fatalf("service status asked %d times, want 0", got)
 	}
 }
 
@@ -460,7 +553,9 @@ func TestBuildOpenCodeCommand_V2WaitsForSilentRegisteredService(t *testing.T) {
 		{name: "registered, answers again", pid: os.Getpid(), answersAfter: 2, wantWait: true},
 		{name: "registered, never answers", pid: os.Getpid(), wantWait: true},
 		{name: "not registered", pid: 0},
-		{name: "disabled", pid: os.Getpid(), disabled: true},
+		{name: "disabled", pid: 0, disabled: true},
+		// The setting gates starting, not attaching: a live registered process is waited on like any other.
+		{name: "disabled, registered process alive", pid: os.Getpid(), disabled: true, wantWait: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
