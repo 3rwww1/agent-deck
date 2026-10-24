@@ -12864,6 +12864,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Exec an interactive shell inside the sandbox container.
 		if selected := h.getSelectedSession(); selected != nil && selected.IsSandboxed() &&
 			selected.SandboxContainer != "" {
+			// OpenContainerShell runs docker/tmux setup first; keys typed meanwhile belong to the shell (see holdInputForExec).
+			defer holdInputForExec()()
 			tmuxName, shellErr := selected.OpenContainerShell()
 			if shellErr != nil {
 				h.setError(shellErr)
@@ -13677,6 +13679,8 @@ func (h *Home) changeStatusFilter(filter session.Status) tea.Cmd {
 }
 
 func (h *Home) attachSelectedLegacy() tea.Cmd {
+	// Keys typed while the checks below run belong to the pane (see holdInputForExec).
+	defer holdInputForExec()()
 	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
 		return nil
 	}
@@ -18428,6 +18432,8 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 	if tmuxSess == nil {
 		return nil
 	}
+	// Keys typed while the setup below runs belong to the pane (see holdInputForExec).
+	defer holdInputForExec()()
 
 	// PERFORMANCE: Ensure tmux session is configured on first attach
 	// This runs deferred ConfigureStatusBar, EnableMouseMode
@@ -18757,6 +18763,7 @@ func (r remoteCreateAndAttachCmd) SetStderr(writer io.Writer) {}
 // new-session dialog's choices (#1353), then auto-attaches to it. Zero values
 // fall back to remote defaults (shell, auto-generated name, remote CWD).
 func (h *Home) createRemoteSessionWithOptions(remoteName string, opts session.RemoteAddOptions) tea.Cmd {
+	defer holdInputForExec()() // keys typed meanwhile belong to the remote pane
 	config, err := session.LoadUserConfig()
 	if err != nil || config == nil || config.Remotes == nil {
 		return func() tea.Msg {
@@ -19158,6 +19165,7 @@ func swapRemoteGroupSibling(paths []string, groupPath string, delta int) []strin
 
 // attachRemoteSession attaches to a remote session via SSH, suspending the TUI.
 func (h *Home) attachRemoteSession(remoteName, sessionID string) tea.Cmd {
+	defer holdInputForExec()() // keys typed meanwhile belong to the remote pane
 	runner, err := remoteRunnerFor(remoteName)
 	if err != nil {
 		// Say so instead of a silent no-op on Enter.
