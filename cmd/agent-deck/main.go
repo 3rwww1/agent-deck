@@ -379,6 +379,8 @@ func printCredsRefreshRemoved() {
 }
 
 func main() {
+	processStart := time.Now() // tui.first_frame start (optiming); one clock read
+
 	// Make bare `tmux` invocations resolve even when launched from a minimal
 	// environment (notably a `terminal-notifier -execute` notification click,
 	// whose launchd PATH omits Homebrew's /opt/homebrew/bin). Must run before any
@@ -422,6 +424,8 @@ func main() {
 	// Remote arguments belong to the server, including its script-consent flag.
 	if len(args) > 0 && args[0] == "remote" {
 		beginCLITelemetry(args[0], args[1:])
+		enableTimingsFromConfig() // remote dispatches before the config block below
+		beginCLITiming(args[0], args[1:])
 		defer settleCLITelemetry()
 		handleRemote(profile, args[1:])
 		return
@@ -454,6 +458,7 @@ func main() {
 	if cfg, err := session.LoadUserConfig(); err == nil && cfg != nil {
 		session.ConfigureTmuxDisplay(cfg.Display)
 	}
+	enableTimingsFromConfig()
 
 	// Nudge macOS users whose tmux predates the upstream fix for the
 	// control-mode NULL-deref (tmux #4980, issue #737). Once per process,
@@ -479,6 +484,7 @@ func main() {
 	// Handle subcommands
 	if len(args) > 0 {
 		beginCLITelemetry(args[0], args[1:])
+		beginCLITiming(args[0], args[1:])
 		defer settleCLITelemetry()
 		switch args[0] {
 		case "telemetry":
@@ -561,6 +567,9 @@ func main() {
 			return
 		case "doctor":
 			handleDoctor(args[1:])
+			return
+		case "perf":
+			handlePerf(args[1:])
 			return
 		case "accounts":
 			handleAccounts(args[1:])
@@ -1115,6 +1124,7 @@ func main() {
 	}
 
 	// Start TUI with the specified profile
+	ui.SetProcessStart(processStart)
 	homeModel := ui.NewHomeWithProfileAndMode(profile)
 	setTelemetrySignalClose(homeModel.CloseTelemetry)
 	setWatcherEngineSignalStop(homeModel.StopWatcherEngine)
@@ -1546,6 +1556,7 @@ var storeRootQuietCommands = map[string]bool{
 	"completion":    true,
 	"doctor":        true,
 	"health":        true,
+	"perf":          true,
 	"migrate-paths": true,
 	"telemetry":     true,
 	"version":       true,
@@ -1562,7 +1573,7 @@ var storeRootQuietCommands = map[string]bool{
 // (launch/add --parent, group move --position) is not shadowed by the global
 // profile flag. KEEP IN SYNC with the switch in main().
 var commandRegistry = map[string]bool{
-	"add": true, "accounts": true, "harness": true, "limits": true, "doctor": true, "health": true, "list": true, "ls": true, "remove": true, "rm": true,
+	"add": true, "accounts": true, "harness": true, "limits": true, "doctor": true, "perf": true, "health": true, "list": true, "ls": true, "remove": true, "rm": true,
 	"rename": true, "mv": true, "status": true, "profile": true, "update": true,
 	"session": true, "fleet": true, "mcp": true, "plugin": true, "skill": true, "mcp-proxy": true,
 	"group": true, "try": true, "launch": true, "conductor": true,
@@ -4627,6 +4638,7 @@ func printHelp() {
 	fmt.Println("  limits           Claude 5h/7d and Codex weekly usage per account [--json] ([macapp] plugins)")
 	fmt.Println("  doctor           Check accounts and runtime health")
 	fmt.Println("  health           Runtime health snapshots and budgets [--json] [--since 1h]")
+	fmt.Println("  perf             Operation timings vs targets (record with AGENTDECK_TIMINGS=1) [--json] [--since 24h]")
 	fmt.Println("  try <name>       Quick experiment (create/find dated folder + session)")
 	fmt.Println("  list, ls         List all sessions")
 	fmt.Println("  remove, rm       Remove a session")
