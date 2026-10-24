@@ -419,7 +419,7 @@ func (i *Instance) RestartFrom(sf telemetry.Surface) error {
 func (i *Instance) RestartWithEnv(env map[string]string) error {
 	for key := range env {
 		if !IsValidEnvKey(key) {
-			return fmt.Errorf("invalid environment variable name %q", key)
+			return fmt.Errorf("invalid environment variable name (%s, %d bytes)", EnvKeyRejectReason(key), len(key))
 		}
 	}
 	return i.restartRecorded(env, "")
@@ -594,7 +594,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 			i.SandboxContainer = containerName
 		}
 		ownershipCommand = resumeCmd
-		mcpLog.Debug("respawn_pane_claude", slog.String("command", resumeCmd))
+		mcpLog.Debug("respawn_pane_claude", slog.String("command", logging.RedactCommandEnv(resumeCmd)))
 
 		// #1822 F2: assert AGENTDECK_PROFILE / CLAUDE_CONFIG_DIR host-side
 		// BEFORE respawn-pane, not after. tmux applies the session environment
@@ -651,7 +651,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 			i.SandboxContainer = containerName
 		}
 		ownershipCommand = resumeCmd
-		sessionLog.Info("restart_gemini_respawn", slog.String("command", resumeCmd))
+		sessionLog.Info("restart_gemini_respawn", slog.String("command", logging.RedactCommandEnv(resumeCmd)))
 
 		// #1822 F2: gemini's rebuilt resume command carries no inline
 		// AGENTDECK_PROFILE prefix, and this branch returns before the
@@ -711,7 +711,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 			i.SandboxContainer = containerName
 		}
 		ownershipCommand = resumeCmd
-		sessionLog.Info("restart_opencode_respawn", slog.String("command", resumeCmd))
+		sessionLog.Info("restart_opencode_respawn", slog.String("command", logging.RedactCommandEnv(resumeCmd)))
 
 		// #1822 F2: opencode's rebuilt resume command carries no inline
 		// AGENTDECK_PROFILE prefix, and this branch returns before the
@@ -786,7 +786,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 			i.SandboxContainer = containerName
 		}
 		ownershipCommand = resumeCmd
-		sessionLog.Info("restart_codex_respawn", slog.String("command", resumeCmd))
+		sessionLog.Info("restart_codex_respawn", slog.String("command", logging.RedactCommandEnv(resumeCmd)))
 
 		// #1822 F2: belt-and-suspenders to the inline prefix buildCodexCommand
 		// already injects; this branch returns before the fallback recreate
@@ -830,7 +830,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 			i.SandboxContainer = containerName
 		}
 		ownershipCommand = resumeCmd
-		sessionLog.Info("restart_cursor_respawn", slog.String("command", resumeCmd))
+		sessionLog.Info("restart_cursor_respawn", slog.String("command", logging.RedactCommandEnv(resumeCmd)))
 
 		// #1822 F2: must run BEFORE RespawnPane — see the Claude branch above
 		// for why (tmux applies session env at process start, not after).
@@ -1042,7 +1042,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 	// call to Start(); config edits land on the next restart this way.
 	ApplyConfiguredLoadout(i)
 
-	mcpLog.Debug("restart_starting_new_session", slog.String("command", command))
+	mcpLog.Debug("restart_starting_new_session", slog.String("command", logging.RedactCommandEnv(command)))
 	command, err = i.wrapTrackedCommandExit(command)
 	if err != nil {
 		return err
