@@ -1093,7 +1093,14 @@ func isBrailleSpinnerChar(ch string) bool {
 // NOTE: All mutable fields are protected by mu. The Bubble Tea event loop is single-threaded,
 // but we use mutex protection for defensive programming and future-proofing.
 type Session struct {
-	Name        string
+	// Name is the tmux session name. Start may rewrite it (fresh suffix when
+	// the name is taken), so readers that can run concurrently with Start,
+	// such as the status polls, use TmuxName() instead of the field (#2808).
+	Name string
+	// nameMu guards Name and Command against Start's rewrite. It is a leaf
+	// lock: held only for the field access, never across a tmux call or while
+	// taking mu, so it can be taken with or without mu held.
+	nameMu      sync.RWMutex
 	DisplayName string
 	WorkDir     string
 	// GroupPath is the agent-deck group/tree path this session belongs to
@@ -1787,7 +1794,7 @@ func (s *Session) expireStartupHandover() bool {
 
 	restartTarget := s.DisplayName
 	if strings.TrimSpace(restartTarget) == "" {
-		restartTarget = s.Name
+		restartTarget = s.TmuxName()
 	}
 	message := fmt.Sprintf("Session startup timed out before the agent became interactive.\n\nRecovery: agent-deck session restart %s\n", shellescape.Quote(restartTarget))
 	// A tmux pane command normally inherits the pane's controlling terminal on
@@ -1798,16 +1805,16 @@ func (s *Session) expireStartupHandover() bool {
 	hold := fmt.Sprintf("printf %%s %s; stty -echo </dev/tty 2>/dev/null || true; exec sleep 2147483647", shellescape.Quote(message))
 	wrapped, err := wrapRespawnCommand(hold)
 	if err == nil {
-		args := append([]string{"respawn-pane", "-k", "-t", s.Name + ":"}, wrapped...)
+		args := append([]string{"respawn-pane", "-k", "-t", s.TmuxName() + ":"}, wrapped...)
 		ctx, cancel := context.WithTimeout(context.Background(), tmuxMutationTimeout)
 		output, respawnErr := s.tmuxCmdContext(ctx, args...).CombinedOutput()
 		respawnErr = annotateDeadline(ctx.Err(), respawnErr)
 		cancel()
 		if respawnErr != nil {
-			statusLog.Warn("startup_timeout_hold_failed", slog.String("session", s.Name), slog.String("error", respawnErr.Error()), slog.String("output", string(output)))
+			statusLog.Warn("startup_timeout_hold_failed", slog.String("session", s.TmuxName()), slog.String("error", respawnErr.Error()), slog.String("output", string(output)))
 		}
 	} else {
-		statusLog.Warn("startup_timeout_hold_wrap_failed", slog.String("session", s.Name), slog.String("error", err.Error()))
+		statusLog.Warn("startup_timeout_hold_wrap_failed", slog.String("session", s.TmuxName()), slog.String("error", err.Error()))
 	}
 	return true
 }
@@ -1966,7 +1973,7 @@ func (s *Session) SetClearOnRestart(clear bool) {
 // LogFile returns the path to this session's log file
 // Logs are stored under the XDG data directory, falling back to legacy logs.
 func (s *Session) LogFile() string {
-	return filepath.Join(LogDir(), s.Name+".log")
+	return filepath.Join(LogDir(), s.TmuxName()+".log")
 }
 
 // LogDir returns the directory containing all session logs
@@ -1996,6 +2003,22 @@ func NewSession(name, workDir string) *Session {
 		terminalChromeEnabled: false,            // Default: opt-in (set true via [terminal].iterm_badge)
 		// stateTracker and promptDetector will be created lazily on first status check
 	}
+}
+
+// TmuxName returns the tmux session name under nameMu, so it is safe to call
+// while another goroutine runs Start, which may rename the session (#2808).
+func (s *Session) TmuxName() string {
+	s.nameMu.RLock()
+	defer s.nameMu.RUnlock()
+	return s.Name
+}
+
+// launchCommand returns Command under nameMu; Start rewrites it while the
+// status poll may be detecting the tool (#2808).
+func (s *Session) launchCommand() string {
+	s.nameMu.RLock()
+	defer s.nameMu.RUnlock()
+	return s.Command
 }
 
 // ReconnectSession creates a Session object for an existing tmux session
@@ -2339,7 +2362,7 @@ func (s *Session) ApplyThemeOptions() error {
 func (s *Session) ReadEnvironment(key string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	output, err := commandOutput(s.tmuxCmdContext(ctx, "show-environment", "-t", s.Name))
+	output, err := commandOutput(s.tmuxCmdContext(ctx, "show-environment", "-t", s.TmuxName()))
 	if err != nil {
 		return "", err
 	}
@@ -2380,7 +2403,7 @@ func (s *Session) GetEnvironment(key string) (string, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := s.tmuxCmdContext(ctx, "show-environment", "-t", s.Name, key)
+	cmd := s.tmuxCmdContext(ctx, "show-environment", "-t", s.TmuxName(), key)
 	output, err := commandOutput(cmd)
 	if err != nil {
 		s.storeEnvCacheEntry(key, envCacheEntry{time: time.Now()})
@@ -2609,7 +2632,9 @@ func (s *Session) Start(command string) error {
 	}
 	workDir = resolvedWorkDir
 
+	s.nameMu.Lock()
 	s.Command = command
+	s.nameMu.Unlock()
 	s.invalidateCache()
 	s.Created = time.Now()
 	s.mu.Lock()
@@ -2625,7 +2650,10 @@ func (s *Session) Start(command string) error {
 	if s.Exists() {
 		// Session with this exact name exists - regenerate with new unique suffix
 		sanitized := sanitizeName(s.DisplayName)
-		s.Name = SessionPrefix + sanitized + "_" + generateShortID()
+		renamed := SessionPrefix + sanitized + "_" + generateShortID()
+		s.nameMu.Lock()
+		s.Name = renamed
+		s.nameMu.Unlock()
 	}
 
 	// Create new tmux session in detached mode with the command as the initial
@@ -3176,19 +3204,19 @@ func (s *Session) killAfterPaneCwdFailure(cwdErr error) error {
 func (s *Session) ProbeExists() (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
 	defer cancel()
-	_, err := commandOutput(s.tmuxCmdContext(ctx, "has-session", "-t", "="+s.Name))
+	_, err := commandOutput(s.tmuxCmdContext(ctx, "has-session", "-t", "="+s.TmuxName()))
 	if err == nil {
 		return true, nil
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		return false, fmt.Errorf("tmux has-session probe for %q timed out after %s", s.Name, hasSessionProbeTimeout)
+		return false, fmt.Errorf("tmux has-session probe for %q timed out after %s", s.TmuxName(), hasSessionProbeTimeout)
 	}
 	if socketHasProtocolMismatch(s.SocketName) {
 		return false, fmt.Errorf("tmux client/server protocol version mismatch on socket %q", s.SocketName)
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || !exitErr.Exited() {
-		return false, fmt.Errorf("tmux has-session probe for %q did not complete: %w", s.Name, err)
+		return false, fmt.Errorf("tmux has-session probe for %q did not complete: %w", s.TmuxName(), err)
 	}
 	stderr := strings.TrimSpace(string(exitErr.Stderr))
 	if strings.HasPrefix(stderr, "can't find session:") ||
@@ -3196,7 +3224,7 @@ func (s *Session) ProbeExists() (bool, error) {
 		(strings.Contains(stderr, "error connecting to") && strings.Contains(stderr, "No such file or directory")) {
 		return false, nil
 	}
-	return false, fmt.Errorf("tmux has-session probe for %q was inconclusive: %w", s.Name, err)
+	return false, fmt.Errorf("tmux has-session probe for %q was inconclusive: %w", s.TmuxName(), err)
 }
 
 // Exists checks if the tmux session exists
@@ -3218,14 +3246,14 @@ func (s *Session) Exists() bool {
 	// (multi-socket cache aliasing), after which restart machinery could kill
 	// the still-running pane.
 	if strings.TrimSpace(s.SocketName) == DefaultSocketName() {
-		if exists, cacheValid := sessionExistsFromCache(s.Name); cacheValid && exists {
+		if exists, cacheValid := sessionExistsFromCache(s.TmuxName()); cacheValid && exists {
 			return true
 		}
 	}
 
 	// If PipeManager has a live control connection, the session definitely exists.
 	if pm := GetPipeManager(); pm != nil {
-		if pm.IsConnected(s.Name) {
+		if pm.IsConnected(s.TmuxName()) {
 			return true
 		}
 	}
@@ -3238,7 +3266,7 @@ func (s *Session) Exists() bool {
 	// that actually completes with a non-success status means "gone".
 	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
 	defer cancel()
-	err := commandRun(s.tmuxCmdContext(ctx, "has-session", "-t", s.Name))
+	err := commandRun(s.tmuxCmdContext(ctx, "has-session", "-t", s.TmuxName()))
 	if ctx.Err() == context.DeadlineExceeded {
 		return true // probe timed out: indeterminate, assume still alive
 	}
@@ -3307,14 +3335,14 @@ func (s *Session) AbsentFromCache() bool {
 // machinery — use Exists() (which confirms a negative with a real probe).
 func (s *Session) ExistsCached() bool {
 	if strings.TrimSpace(s.SocketName) == DefaultSocketName() {
-		if exists, cacheValid := sessionExistsFromCache(s.Name); cacheValid && exists {
+		if exists, cacheValid := sessionExistsFromCache(s.TmuxName()); cacheValid && exists {
 			return true
 		}
-	} else if sessionExistsOnSocketCached(s.SocketName, s.Name) {
+	} else if sessionExistsOnSocketCached(s.SocketName, s.TmuxName()) {
 		return true
 	}
 	if pm := GetPipeManager(); pm != nil {
-		if pm.IsConnected(s.Name) {
+		if pm.IsConnected(s.TmuxName()) {
 			return true
 		}
 	}
@@ -3326,7 +3354,7 @@ func (s *Session) ExistsCached() bool {
 // Falls back to a direct tmux query targeting pane 0.0 (the primary pane)
 // to avoid false positives in multi-pane layouts.
 func (s *Session) IsPaneDead() bool {
-	if info, ok := GetCachedPaneInfo(s.Name); ok {
+	if info, ok := GetCachedPaneInfo(s.TmuxName()); ok {
 		return info.Dead
 	}
 	// Cache miss: direct tmux check targeting the primary pane. Bound it the
@@ -3337,7 +3365,7 @@ func (s *Session) IsPaneDead() bool {
 	// live pane as dead would flip the session to an error state.
 	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
 	defer cancel()
-	out, err := commandOutput(s.tmuxCmdContext(ctx, "list-panes", "-t", s.Name+":0.0", "-F", "#{pane_dead}"))
+	out, err := commandOutput(s.tmuxCmdContext(ctx, "list-panes", "-t", s.TmuxName()+":0.0", "-F", "#{pane_dead}"))
 	if err != nil {
 		return false
 	}
@@ -3365,7 +3393,7 @@ func (s *Session) PaneDeadExitStatus() (int, bool) {
 	// wedged tmux server must not stall it.
 	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
 	defer cancel()
-	out, err := commandOutput(s.tmuxCmdContext(ctx, "list-panes", "-t", s.Name+":0.0", "-F", "#{pane_dead}|#{pane_dead_status}"))
+	out, err := commandOutput(s.tmuxCmdContext(ctx, "list-panes", "-t", s.TmuxName()+":0.0", "-F", "#{pane_dead}|#{pane_dead_status}"))
 	if err != nil {
 		return 0, false
 	}
@@ -3689,7 +3717,7 @@ func (s *Session) getPaneProcessTree() (panePID int, allPIDs []int) {
 		// must not be silent: on a loaded box this is how a SIGHUP-immune agent
 		// survives a Kill() as an orphan.
 		statusLog.Warn("pane_process_tree_probe_failed",
-			slog.String("session", logging.SanitizeValue(s.Name)),
+			slog.String("session", logging.SanitizeValue(s.TmuxName())),
 			slog.String("error", err.Error()))
 		return 0, nil
 	}
@@ -3704,7 +3732,7 @@ func (s *Session) getPaneProcessTree() (panePID int, allPIDs []int) {
 // error would be recorded as "we own pid 0" or, worse, as "the spawn owns
 // nothing" — both of which turn an unproven claim into a durable one.
 func (s *Session) PanePID() (int, error) {
-	return PanePIDOfSession(s.SocketName, s.Name)
+	return PanePIDOfSession(s.SocketName, s.TmuxName())
 }
 
 // PrimaryPanePID is PanePID for the managed agent window, whichever window
@@ -3717,7 +3745,7 @@ func (s *Session) PrimaryPanePID() (int, error) {
 // AllPanePIDs lists the pane pid of every pane in every window of the
 // session.
 func (s *Session) AllPanePIDs() ([]int, error) {
-	out, err := runBoundedOutput(s.SocketName, "list-panes", "-s", "-t", s.Name, "-F", "#{pane_pid}")
+	out, err := runBoundedOutput(s.SocketName, "list-panes", "-s", "-t", s.TmuxName(), "-F", "#{pane_pid}")
 	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return nil, err
 	}
@@ -3752,7 +3780,7 @@ func PanePIDOfSession(socketName, sessionName string) (int, error) {
 // SIGTERM->SIGKILL the process the user just restarted. See
 // escalateAfterRespawn.
 func (s *Session) paneProcessTree() (panePID int, allPIDs []int, err error) {
-	target := s.Name + ":"
+	target := s.TmuxName() + ":"
 	// Bounded — see tmuxPollTimeout. Runs on the respawn path: a hang here
 	// stalls the restart that is supposed to clear the bad state.
 	out, err := s.runBoundedOutput("list-panes", "-t", target, "-F", "#{pane_pid}")
@@ -4098,19 +4126,19 @@ func wrapRespawnCommandWithResolver(command string, lookPath func(string) (strin
 // Falls back to direct tmux call if cache is stale
 func (s *Session) GetWindowActivity() (int64, error) {
 	// Try cache first (O(1) map lookup, no subprocess)
-	if activity, cacheValid := sessionActivityFromCache(s.Name); cacheValid {
+	if activity, cacheValid := sessionActivityFromCache(s.TmuxName()); cacheValid {
 		return activity, nil
 	}
 
 	// When PipeManager is active, route through pipe (zero subprocess)
 	if pm := GetPipeManager(); pm != nil {
-		return pm.GetWindowActivity(s.Name)
+		return pm.GetWindowActivity(s.TmuxName())
 	}
 
 	// No PipeManager: fall back to direct check (spawns subprocess)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := s.tmuxCmdContext(ctx, "display-message", "-t", s.Name, "-p", "#{window_activity}")
+	cmd := s.tmuxCmdContext(ctx, "display-message", "-t", s.TmuxName(), "-p", "#{window_activity}")
 	output, err := commandOutput(cmd)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get window activity: %w", err)
@@ -4127,7 +4155,7 @@ func (s *Session) GetWindowActivity() (int64, error) {
 // spawning a subprocess. Returns 0 if the cache is stale or session not found.
 // This is used for cheap idle-session activity gating in tiered polling.
 func (s *Session) GetCachedWindowActivity() int64 {
-	activity, valid := sessionActivityFromCache(s.Name)
+	activity, valid := sessionActivityFromCache(s.TmuxName())
 	if valid {
 		return activity
 	}
@@ -4143,7 +4171,7 @@ func (s *Session) CapturePane() (string, error) {
 	if s.captureCacheFreshLocked(time.Now()) {
 		content := s.cacheContent
 		s.cacheMu.RUnlock()
-		logging.Aggregate(logging.CompPerf, "capture_pane_cache_hit", slog.String("session", s.Name))
+		logging.Aggregate(logging.CompPerf, "capture_pane_cache_hit", slog.String("session", s.TmuxName()))
 		return content, nil
 	}
 	s.cacheMu.RUnlock()
@@ -4162,13 +4190,13 @@ func (s *Session) CapturePane() (string, error) {
 		// Try control mode pipe first (zero subprocess)
 		if pm := GetPipeManager(); pm != nil {
 			pipeStart := time.Now()
-			if content, pipeErr := pm.CapturePane(s.Name); pipeErr == nil {
+			if content, pipeErr := pm.CapturePane(s.TmuxName()); pipeErr == nil {
 				s.cacheMu.Lock()
 				s.cacheContent = content
 				s.cacheTime = time.Now()
 				s.cacheMu.Unlock()
 				logging.Aggregate(logging.CompPerf, "capture_pane_pipe",
-					slog.String("session", s.Name),
+					slog.String("session", s.TmuxName()),
 					slog.Duration("elapsed", time.Since(pipeStart)))
 				return content, nil
 			}
@@ -4180,10 +4208,10 @@ func (s *Session) CapturePane() (string, error) {
 
 		// Subprocess fallback: 3s timeout
 		finish := logging.TraceOp(perfLog, "capture_pane_subprocess", 200*time.Millisecond,
-			slog.String("session", s.Name))
+			slog.String("session", s.TmuxName()))
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		cmd := s.tmuxCmdContext(ctx, "capture-pane", "-t", s.Name, "-p", "-e")
+		cmd := s.tmuxCmdContext(ctx, "capture-pane", "-t", s.TmuxName(), "-p", "-e")
 		output, err := commandOutput(cmd)
 		finish()
 		if err != nil {
@@ -4224,7 +4252,7 @@ func (s *Session) CapturePaneFresh() (string, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := s.tmuxCmdContext(ctx, "capture-pane", "-t", s.Name, "-p", "-e")
+	cmd := s.tmuxCmdContext(ctx, "capture-pane", "-t", s.TmuxName(), "-p", "-e")
 	output, err := commandOutput(cmd)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -4275,7 +4303,7 @@ func (s *Session) CaptureFullHistory() (string, error) {
 	// Bounded — see tmuxPollTimeout. The TUI calls this on a cadence, and it
 	// was the single largest CPU sink in the 2026-07-21 incident: three
 	// concurrent `capture-pane -S -2000` clients, each spinning >20 minutes.
-	output, err := s.runBoundedOutput("capture-pane", "-t", s.Name, "-p", "-e", "-S", "-2000")
+	output, err := s.runBoundedOutput("capture-pane", "-t", s.TmuxName(), "-p", "-e", "-S", "-2000")
 	if err != nil {
 		if captureGoneFromErr(err) {
 			return "", ErrCaptureGone
@@ -4300,7 +4328,7 @@ func (s *Session) CaptureHistoryLines(n int) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := s.tmuxCmdContext(ctx, "capture-pane", "-t", s.Name, "-p", "-e", "-S", fmt.Sprintf("-%d", n))
+	cmd := s.tmuxCmdContext(ctx, "capture-pane", "-t", s.TmuxName(), "-p", "-e", "-S", fmt.Sprintf("-%d", n))
 	output, err := commandOutput(cmd)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -4328,7 +4356,7 @@ func (s *Session) CapturePrimaryFullHistory() (string, error) {
 
 // CaptureWindowFullHistory captures the scrollback history of a specific window (last 2000 lines).
 func (s *Session) CaptureWindowFullHistory(windowIndex int) (string, error) {
-	target := fmt.Sprintf("%s:%d", s.Name, windowIndex)
+	target := fmt.Sprintf("%s:%d", s.TmuxName(), windowIndex)
 	// Bounded — see tmuxPollTimeout.
 	output, err := s.runBoundedOutput("capture-pane", "-t", target, "-p", "-e", "-S", "-2000")
 	if err != nil {
@@ -4395,7 +4423,7 @@ func (s *Session) DetectTool() string {
 	s.mu.Unlock()
 
 	// Detect tool from command first (most reliable)
-	if tool := detectToolFromCommand(s.Command); tool != "" {
+	if tool := detectToolFromCommand(s.launchCommand()); tool != "" {
 		// Configured launch identity. This is what a restart should run; it is
 		// not an observation of the pane, and a nested process must not replace it.
 		s.rememberTool(tool)
@@ -4415,7 +4443,7 @@ func (s *Session) DetectTool() string {
 
 	// A session created as "shell" can later launch a supported tool. Only
 	// promote it when the pane's current command identifies that tool.
-	if paneInfo, ok := GetCachedPaneInfo(s.Name); ok {
+	if paneInfo, ok := GetCachedPaneInfo(s.TmuxName()); ok {
 		if tool := detectToolFromCommand(paneInfo.CurrentCommand); tool != "" {
 			s.rememberTool(tool)
 			return tool
@@ -4502,7 +4530,7 @@ func (s *Session) AcknowledgeWithSnapshot() {
 
 func (s *Session) GetStatus() (string, error) {
 	finish := logging.TraceOp(perfLog, "get_status", 100*time.Millisecond,
-		slog.String("session", s.Name))
+		slog.String("session", s.TmuxName()))
 	defer finish()
 
 	shortName := s.DisplayName
@@ -4575,7 +4603,7 @@ func (s *Session) GetStatus() (string, error) {
 	// FAST PATH: Title-based state detection for Claude Code sessions.
 	// Claude Code sets pane titles via OSC sequences: Braille spinner while working,
 	// ✳ markers when done. One character check replaces full CapturePane + content scan.
-	if paneInfo, ok := GetCachedPaneInfo(s.Name); ok {
+	if paneInfo, ok := GetCachedPaneInfo(s.TmuxName()); ok {
 		titleState := AnalyzePaneTitle(paneInfo.Title, paneInfo.CurrentCommand)
 		switch titleState {
 		case TitleStateWorking:
@@ -5401,7 +5429,7 @@ func (s *Session) hasBusyIndicator(content string) bool {
 // Claude-shaped pane heuristics (e.g. the background-work footer). Reads cached
 // tool fields without locking; GetStatus callers already hold s.mu.
 func (s *Session) isClaudeTool() bool {
-	return strings.EqualFold(inferToolFromSessionFields(s.detectedTool, s.customToolName, s.Command), "claude")
+	return strings.EqualFold(inferToolFromSessionFields(s.detectedTool, s.customToolName, s.launchCommand()), "claude")
 }
 
 // bgWorkCacheTTL bounds how often BackgroundWorkSince captures the pane while a
@@ -5668,7 +5696,7 @@ func (s *Session) hasBusyIndicatorResolved(content string) bool {
 		shortName = shortName[:12]
 	}
 
-	tool := inferToolFromSessionFields(s.detectedTool, s.customToolName, s.Command)
+	tool := inferToolFromSessionFields(s.detectedTool, s.customToolName, s.launchCommand())
 	patterns := s.resolvedPatterns
 	if patterns == nil {
 		patterns = defaultResolvedPatternsForTool(tool)
@@ -5795,7 +5823,7 @@ func (s *Session) hasBusyIndicatorResolved(content string) bool {
 // NOTE: This method reads s.detectedTool and s.customToolName without locking.
 // Callers in GetStatus() already hold s.mu, so we must not re-lock.
 func (s *Session) hasPromptIndicator(content string) bool {
-	tool := inferToolFromSessionFields(s.detectedTool, s.customToolName, s.Command)
+	tool := inferToolFromSessionFields(s.detectedTool, s.customToolName, s.launchCommand())
 	patterns := s.resolvedPatterns
 	if patterns == nil {
 		patterns = defaultResolvedPatternsForTool(tool)
@@ -5848,7 +5876,7 @@ func (s *Session) hasErrorBannerIndicator(content string) bool {
 	if (s.startupTimedOut || s.startupAt.IsZero()) && strings.Contains(strings.ToLower(StripANSI(content)), "session startup timed out before the agent became interactive") {
 		return true
 	}
-	tool := inferToolFromSessionFields(s.detectedTool, s.customToolName, s.Command)
+	tool := inferToolFromSessionFields(s.detectedTool, s.customToolName, s.launchCommand())
 	if tool == "" {
 		return false
 	}
@@ -5865,7 +5893,7 @@ func (s *Session) hasErrorBannerIndicator(content string) bool {
 // from the session's fields exactly as hasErrorBannerIndicator does, so the two
 // verdicts always agree on which tool's renderings are being read.
 func (s *Session) isAuthFailureIndicator(content string) bool {
-	tool := inferToolFromSessionFields(s.detectedTool, s.customToolName, s.Command)
+	tool := inferToolFromSessionFields(s.detectedTool, s.customToolName, s.launchCommand())
 	if tool == "" {
 		return false
 	}
@@ -5877,7 +5905,7 @@ func (s *Session) isAuthFailureIndicator(content string) bool {
 // Tool is inferred from the session's fields; non-claude tools yield
 // SubstateNone. Pure with respect to session state.
 func (s *Session) classifySubstate(content string) Substate {
-	tool := inferToolFromSessionFields(s.detectedTool, s.customToolName, s.Command)
+	tool := inferToolFromSessionFields(s.detectedTool, s.customToolName, s.launchCommand())
 	if tool == "" {
 		return SubstateNone
 	}
@@ -6220,14 +6248,14 @@ func (s *Session) SendKeys(keys string) error {
 // within this session (e.g. "agentdeck_foo_ab12:2"), mirroring the format used
 // by CaptureWindowFullHistory.
 func (s *Session) windowTarget(windowIndex int) string {
-	return fmt.Sprintf("%s:%d", s.Name, windowIndex)
+	return fmt.Sprintf("%s:%d", s.TmuxName(), windowIndex)
 }
 
 // primaryWindowTarget addresses the first window in the session. tmux's ^
 // selector is independent of base-index and remains stable when an operator
 // opens or focuses auxiliary windows alongside the managed agent.
 func (s *Session) primaryWindowTarget() string {
-	return s.Name + ":^"
+	return s.TmuxName() + ":^"
 }
 
 // SendKeysToPrimaryWindow sends literal text to the managed agent window.
@@ -6960,7 +6988,7 @@ func (s *Session) GetWorkDir() string {
 
 	// Bounded: a wedged server / destroyed target must not hang this poll (see
 	// tmuxPollTimeout). Bare .Output() here was one of the orphan-spin sources.
-	output, err := s.runBoundedOutput("display-message", "-t", s.Name, "-p", "#{pane_current_path}")
+	output, err := s.runBoundedOutput("display-message", "-t", s.TmuxName(), "-p", "#{pane_current_path}")
 	if err != nil {
 		return ""
 	}
@@ -6979,7 +7007,7 @@ func (s *Session) GetWorkDir() string {
 // query. On error it returns (false, err); the caller preserves the pager on
 // error rather than silently disabling a configured feature.
 func (s *Session) IsAltScreen() (bool, error) {
-	output, err := s.runBoundedOutput("display-message", "-t", s.Name, "-p", "#{alternate_on}")
+	output, err := s.runBoundedOutput("display-message", "-t", s.TmuxName(), "-p", "#{alternate_on}")
 	if err != nil {
 		return false, err
 	}
@@ -7073,7 +7101,7 @@ var ErrWindowChanged = errors.New("window changed since it was selected")
 // nonexistent/closed index look like a valid, different window.
 func (s *Session) listWindows() ([]WindowInfo, error) {
 	out, err := runBoundedOutput(s.SocketName,
-		"list-windows", "-t", s.Name, "-F", tmuxFmt("#{window_index}", "#{window_id}", "#{window_name}"))
+		"list-windows", "-t", s.TmuxName(), "-F", tmuxFmt("#{window_index}", "#{window_id}", "#{window_name}"))
 	if err != nil {
 		return nil, err
 	}
