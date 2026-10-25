@@ -483,6 +483,15 @@ func main() {
 	if len(args) == 0 || !storeRootQuietCommands[args[0]] {
 		session.EnsureStateRootPrivate(os.Stderr)
 	}
+	// FX-8 safe defaults: an install that predates them keeps today's values
+	// for every unset switch (dangerous_mode, auto_trust_folders), written
+	// into its config.toml once with a one-time notice. Only at an
+	// interactive start: daemons, hooks, scripts and the auto-update restart
+	// path never edit config.toml (their unset switches resolve the same way
+	// through session.InstallKind). The TUI prints the notice after it exits.
+	if (len(args) == 0 || !storeRootQuietCommands[args[0]]) && stdinStdoutIsTerminal() {
+		applyInstallDefaults(len(args) == 0 || !commandRegistry[args[0]])
+	}
 
 	var webEnabled bool
 	// webHeadless: true when --no-tui is passed to the `web` subcommand.
@@ -1446,6 +1455,7 @@ func main() {
 	tuiRunning.Store(true)
 	_, runErr := p.Run()
 	tuiRunning.Store(false)
+	printDeferredInstallNotice()
 	homeModel.CloseTelemetryAfterRun(runErr)
 	if runErr != nil {
 		reportTUIRunError(runErr)
@@ -2042,6 +2052,7 @@ func handleAddCommand(profile string, args []string, inspectFlags func(*flag.Fla
 	// the user confirms creating a missing directory on the server; the local
 	// dialog asks the same question and calls os.MkdirAll itself.
 	createDir := fs.Bool("create-dir", false, "Create the project directory when it does not exist (like mkdir -p)")
+	trustFolder := fs.Bool("trust-folder", false, "Let agent-deck mark this folder trusted for the tool (adds it to [security] trusted_folders in config.toml)")
 
 	// Sandbox flags
 	sandbox := fs.Bool("sandbox", false, "Run session in Docker sandbox")
@@ -2411,6 +2422,12 @@ func handleAddCommand(profile string, args []string, inspectFlags func(*flag.Fla
 		}
 		if !info.IsDir() {
 			fmt.Printf("Error: path is not a directory: %s\n", path)
+			exitCLI(1)
+		}
+	}
+	if *trustFolder && *sshHost == "" {
+		if err := session.AddTrustedFolder(path); err != nil {
+			fmt.Printf("Error: %v\n", err)
 			exitCLI(1)
 		}
 	}

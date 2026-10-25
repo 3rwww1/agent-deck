@@ -157,6 +157,7 @@ func handleLaunchCommand(profile string, args []string, inspectFlags func(*flag.
 	idleTimeout := fs.String("idle-timeout", "", "Auto-stop session after this duration of no tmux output (Go duration: 30m, 1h, 24h). 0 or unset = disabled")
 
 	createDir := fs.Bool("create-dir", false, "Create the project directory when it does not exist")
+	trustFolder := fs.Bool("trust-folder", false, "Let agent-deck mark this folder trusted for the tool (adds it to [security] trusted_folders in config.toml)")
 	capabilities := fs.Bool("capabilities", false, "Report authoritative creation fields and host catalogs (requires --json)")
 	startupQuery := fs.String("startup-query", "", "Claude startup query, delivered once on initial start")
 	var additionalPaths []string
@@ -377,6 +378,12 @@ func handleLaunchCommand(profile string, args []string, inspectFlags func(*flag.
 	if !info.IsDir() {
 		out.Error(fmt.Sprintf("path is not a directory: %s", path), ErrCodeInvalidOperation)
 		exitCLI(1)
+	}
+	if *trustFolder {
+		if err := session.AddTrustedFolder(path); err != nil {
+			out.Error(err.Error(), ErrCodeInvalidOperation)
+			exitCLI(1)
+		}
 	}
 
 	// Handle worktree creation
@@ -853,7 +860,10 @@ func handleLaunchCommand(profile string, args []string, inspectFlags func(*flag.
 	// success. This mirrors the same pre-seed already used for conductor
 	// dirs (#1359) and worktree parents (#1149) — best-effort, never
 	// blocks the launch.
-	session.PreAcceptLaunchTrust(newInstance)
+	// On a new install a folder outside the FX-8 trust rule is not seeded:
+	// the result says so (stderr note, and FOLDER_NOT_TRUSTED in --json)
+	// instead of reading as a clean success.
+	trustWarning := session.PreAcceptLaunchTrust(newInstance)
 
 	// Start the session.
 	// - default: StartWithMessage waits for readiness and delivers initial prompt
@@ -1008,6 +1018,9 @@ func handleLaunchCommand(profile string, args []string, inspectFlags func(*flag.
 	if worktreePath != "" {
 		jsonData["worktree_path"] = worktreePath
 		jsonData["worktree_branch"] = wtBranch
+	}
+	if trustWarning != nil {
+		jsonData["warnings"] = []*session.LaunchWarning{trustWarning}
 	}
 	addModelInfoJSON(jsonData, newInstance.LaunchModelInfo())
 	addEffortJSON(jsonData, newInstance)
