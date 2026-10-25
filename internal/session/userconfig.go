@@ -4904,19 +4904,6 @@ func GetToolIcon(toolName string) string {
 	}
 }
 
-// GetToolBusyPatterns returns busy patterns for a tool (custom + built-in)
-func GetToolBusyPatterns(toolName string) []string {
-	var patterns []string
-
-	// Add custom patterns first
-	if def := GetToolDef(toolName); def != nil {
-		patterns = append(patterns, def.BusyPatterns...)
-	}
-
-	// Built-in patterns are handled by the detector
-	return patterns
-}
-
 // MergeToolPatterns returns merged RawPatterns for a tool, combining built-in
 // defaults with any user overrides/extras from config.toml.
 // Works for ALL tools: built-in (claude, gemini, etc.) and custom.
@@ -5394,15 +5381,6 @@ func GetMaintenanceSettings() MaintenanceSettings {
 		return MaintenanceSettings{Enabled: false}
 	}
 	return config.Maintenance
-}
-
-// GetStatusSettings returns status detection settings with defaults applied.
-func GetStatusSettings() StatusSettings {
-	config, err := LoadUserConfig()
-	if err != nil || config == nil {
-		return StatusSettings{}
-	}
-	return config.Status
 }
 
 // GetDockerSettings returns docker sandbox settings with defaults applied.
