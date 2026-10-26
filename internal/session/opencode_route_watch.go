@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -80,24 +81,31 @@ func (w *openCodeRouteWatch) sweep(instances []*Instance) {
 		}
 		// A person on the pane may be typing, and a restart would drop the text: what they do next is theirs.
 		if w.watched(inst) {
+			if !lane.watched {
+				logOpenCodeRoute(inst, "route_home_watched", "pane attached, left to the person")
+			}
 			w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid, outages: outages, watched: true}
 			continue
 		}
 		if !lane.homeSeen {
 			lane.homeSeen = true
 			w.lanes[inst.ID] = lane
+			logOpenCodeRoute(inst, "route_home_seen", fmt.Sprintf("service_pid=%d last_pid=%d outages=%d last_outages=%d", pid, lane.servicePID, outages, lane.outages))
 			continue
 		}
 		if !inst.boundOpenCodeSessionTitled() {
+			logOpenCodeRoute(inst, "route_reopen_skipped", "bound session has no title")
 			continue
 		}
 		sessionLog.Warn("opencode_route_lost_reopen",
 			slog.String("instance_id", inst.ID),
 			slog.String("session_id", inst.OpenCodeSessionID))
+		logOpenCodeRoute(inst, "route_reopen", fmt.Sprintf("service_pid=%d outages=%d", pid, outages))
 		if err := w.reopen(inst); err != nil {
 			sessionLog.Warn("opencode_route_reopen_failed",
 				slog.String("instance_id", inst.ID),
 				slog.String("error", err.Error()))
+			logOpenCodeRoute(inst, "route_reopen_failed", err.Error())
 			continue
 		}
 		w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid, outages: outages}
@@ -159,4 +167,16 @@ func liveOpenCodeServicePID() int {
 		return 0
 	}
 	return reg.PID
+}
+
+// logOpenCodeRoute writes to the always-on lifecycle log: debug.log is off unless AGENTDECK_DEBUG is set.
+func logOpenCodeRoute(inst *Instance, action, reason string) {
+	_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+		InstanceID: inst.ID,
+		Tool:       "opencode",
+		Action:     action,
+		Source:     "route_watch",
+		OldID:      inst.OpenCodeSessionID,
+		Reason:     reason,
+	})
 }
