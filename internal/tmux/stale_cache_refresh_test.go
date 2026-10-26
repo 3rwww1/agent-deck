@@ -255,7 +255,9 @@ func TestStaleCacheRefresh_OlderListingNeverOverwritesNewer(t *testing.T) {
 func TestStaleCacheRefresh_FailureKeepsListingStoredMeanwhile(t *testing.T) {
 	dir := installStaleCacheFake(t)
 	RefreshSessionCache()
-	writeStaleFixture(t, dir, "down", "")
+	// "no server running" is an authoritative empty listing, so fail on the connection instead.
+	writeFakeTmux(t, dir, `echo 'error connecting to /tmp/tmux-test/default (Connection refused)' >&2; exit 1
+`)
 	sessionCacheMu.Lock()
 	sessionCacheStoredAt = time.Now().Add(time.Hour)
 	sessionCacheMu.Unlock()
