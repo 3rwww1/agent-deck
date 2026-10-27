@@ -42,9 +42,15 @@ func parseOpenCodeMajorVersion(out string) (int, bool) {
 }
 
 type openCodeVersionAnswer struct {
-	major int
-	ok    bool
+	major   int
+	ok      bool
+	version string // the full version token, prerelease suffix included, "" when it did not parse
 }
+
+// openCodeFullVersionPattern matches the full version token in `opencode --version`
+// output, prerelease suffix included: "opencode v2.1.4" -> 2.1.4, the dev channel's
+// "0.0.0-dev-42" -> 0.0.0-dev-42.
+var openCodeFullVersionPattern = regexp.MustCompile(`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?`)
 
 // openCodeVersionMemo maps modelProbeKey -> openCodeVersionAnswer.
 var openCodeVersionMemo sync.Map
@@ -64,24 +70,42 @@ func probeInstalledOpenCodeMajorVersion(i *Instance) (int, bool) {
 }
 
 func probeOpenCodeBinaryMajorVersion(binary string) (int, bool) {
+	answer := probeOpenCodeBinaryVersion(binary)
+	return answer.major, answer.ok
+}
+
+// probeOpenCodeBinaryVersion memoises the `--version` answer per resolved binary
+// path, mtime and size, so an upgrade is re-probed.
+func probeOpenCodeBinaryVersion(binary string) openCodeVersionAnswer {
 	key, err := modelProbeBinaryKey(binary)
 	if err != nil {
-		return 0, false
+		return openCodeVersionAnswer{}
 	}
 	if cached, ok := openCodeVersionMemo.Load(key); ok {
-		answer := cached.(openCodeVersionAnswer)
-		return answer.major, answer.ok
+		return cached.(openCodeVersionAnswer)
 	}
 	out, err := runModelProbeCommand(key.Path, "--version")
 	if err != nil {
 		// Not memoised: a cold start can time out once, and remembering that
 		// would keep the 1.x flags until the binary changes.
-		return 0, false
+		return openCodeVersionAnswer{}
 	}
 	var answer openCodeVersionAnswer
 	answer.major, answer.ok = parseOpenCodeMajorVersion(string(out))
+	answer.version = openCodeFullVersionPattern.FindString(string(out))
 	openCodeVersionMemo.Store(key, answer)
-	return answer.major, answer.ok
+	return answer
+}
+
+// probeOpenCodeCLIVersion reports the full version the guard's skew check compares
+// the service's answer against. A var so tests can pin a version without an
+// installed CLI; TestMain pins "" so the package's tests never exec the host's
+// opencode.
+var probeOpenCodeCLIVersion = openCodeCLIVersion
+
+func openCodeCLIVersion(binary string) (string, bool) {
+	answer := probeOpenCodeBinaryVersion(binary)
+	return answer.version, answer.version != ""
 }
 
 // openCodeLaunchBinary resolves the executable of the configured [opencode]

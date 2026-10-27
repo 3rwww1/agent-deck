@@ -269,6 +269,10 @@ func runTestMain(m *testing.M) int {
 	// with --version. Version-specific tests set their own answer.
 	probeOpenCodeMajorVersion = func(*Instance) (int, bool) { return 0, false }
 
+	// The service guard's skew check compares the CLI's --version answer. Same
+	// pin, same reason: no test execs the host's opencode.
+	probeOpenCodeCLIVersion = func(string) (string, bool) { return "", false }
+
 	// Force test profile to prevent production data corruption
 	// See CLAUDE.md: "2025-12-11 Incident: Tests with AGENTDECK_PROFILE=work overwrote ALL 36 production sessions"
 	os.Setenv("AGENTDECK_PROFILE", "_test")
