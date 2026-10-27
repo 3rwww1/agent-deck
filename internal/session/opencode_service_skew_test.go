@@ -19,16 +19,17 @@ func pinOpenCodeCLIVersion(t *testing.T, version string, ok bool) {
 	t.Cleanup(func() { probeOpenCodeCLIVersion = prev })
 }
 
-// useInstalledOpenCodeCLIVersion undoes TestMain's pin so a test exercises the real
-// resolve-and-probe path against the stub binary it wrote.
+// useInstalledOpenCodeCLIVersion undoes TestMain's pins so a test exercises the
+// real resolve-and-probe path against the stub binary it wrote.
 func useInstalledOpenCodeCLIVersion(t *testing.T) {
 	t.Helper()
-	prev := probeOpenCodeCLIVersion
+	prevProbe := probeOpenCodeCLIVersion
 	probeOpenCodeCLIVersion = openCodeCLIVersion
-	openCodeVersionMemo.Clear()
+	prevRun := runOpenCodeVersionCommand
+	runOpenCodeVersionCommand = runModelProbeCommand
 	t.Cleanup(func() {
-		probeOpenCodeCLIVersion = prev
-		openCodeVersionMemo.Clear()
+		probeOpenCodeCLIVersion = prevProbe
+		runOpenCodeVersionCommand = prevRun
 	})
 }
 
@@ -51,7 +52,7 @@ func TestOpenCodeServiceGuard_VersionSkewRestartsOnce(t *testing.T) {
 	if got := fake.starts.Load(); got != 0 {
 		t.Fatalf("starts = %d, want 0: a running service is restarted, not started", got)
 	}
-	marker, err := os.ReadFile(filepath.Join(lockDir, openCodeSkewRestartName))
+	marker, err := os.ReadFile(openCodeSkewMarker(lockDir, "2.1.0", "2.1.4"))
 	if err != nil {
 		t.Fatalf("the restart left no once-marker in the locks dir: %v", err)
 	}
@@ -95,8 +96,8 @@ func TestOpenCodeServiceGuard_SkewRestartsOnceAcrossProcesses(t *testing.T) {
 	}
 }
 
-// Only positive version evidence restarts anything: a matching or unknown version on
-// either side leaves the answering service alone.
+// Only positive version evidence restarts anything: a matching, unknown or older
+// version on either side leaves the answering service alone.
 func TestOpenCodeServiceGuard_SameVersionNeverRestarts(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -107,6 +108,7 @@ func TestOpenCodeServiceGuard_SameVersionNeverRestarts(t *testing.T) {
 		{name: "same version", serverVersion: "2.1.4", cliVersion: "2.1.4", cliKnown: true},
 		{name: "server reports no version", serverVersion: "", cliVersion: "2.1.4", cliKnown: true},
 		{name: "installed version unknown", serverVersion: "2.1.0", cliKnown: false},
+		{name: "installed cli older than the server", serverVersion: "2.1.4", cliVersion: "2.1.0", cliKnown: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true, serverVersion: tc.serverVersion}
@@ -179,6 +181,123 @@ func TestOpenCodeServiceGuard_NewSkewPairRestartsAgain(t *testing.T) {
 	}
 }
 
+// Two agent-deck instances on one host resolve different CLIs, 2.1.4 and 2.1.0 (a
+// version-manager shim, a second install): only the newer one restarts, so the two
+// cannot take turns dropping every lane.
+func TestOpenCodeServiceGuard_TwoCLIVersionsRestartOnceTotal(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true, serverVersion: "2.1.0"}
+	fake.answer.Store(true)
+	lockDir := t.TempDir()
+	newer, older := fake.guard(lockDir), fake.guard(lockDir)
+
+	// The 2.1.4 instance restarts the 2.1.0 service once.
+	pinOpenCodeCLIVersion(t, "2.1.4", true)
+	if _, ok := newer.attach("opencode"); !ok {
+		t.Fatal("a skewed service answers its probe; lanes keep attaching while it is replaced")
+	}
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts = %d, want 1 for the newer CLI", got)
+	}
+
+	// The restart landed on 2.1.4, and the 2.1.0 instance now sees skew the other
+	// way: toward its older CLI, which must never restart.
+	fake.serverVersion = "2.1.4"
+	fake.advance(openCodeServiceHealthTTL)
+	pinOpenCodeCLIVersion(t, "2.1.0", true)
+	if _, ok := older.attach("opencode"); !ok {
+		t.Fatal("the answering service stopped being attachable")
+	}
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts = %d after the older CLI checked, want 1: no restart toward an older version", got)
+	}
+
+	// The loop stays closed when both check again.
+	fake.advance(openCodeServiceHealthTTL)
+	pinOpenCodeCLIVersion(t, "2.1.4", true)
+	if _, ok := newer.attach("opencode"); !ok {
+		t.Fatal("the answering service stopped being attachable")
+	}
+	fake.advance(openCodeServiceHealthTTL)
+	pinOpenCodeCLIVersion(t, "2.1.0", true)
+	if _, ok := older.attach("opencode"); !ok {
+		t.Fatal("the answering service stopped being attachable")
+	}
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts = %d across both CLIs, want 1 in total", got)
+	}
+	if _, err := os.Stat(openCodeSkewMarker(lockDir, "2.1.0", "2.1.4")); err != nil {
+		t.Fatalf("the restarted pair left no marker: %v", err)
+	}
+	if _, err := os.Stat(openCodeSkewMarker(lockDir, "2.1.4", "2.1.0")); err == nil {
+		t.Fatal("the downgrade pair got a marker: only the restart direction is recorded")
+	}
+}
+
+// A mise shim does not change when the tool behind it is upgraded, so a memo keyed
+// on the shim file holds the pre-upgrade answer: the skew check probes fresh, and
+// the fresh answer decides.
+func TestOpenCodeServiceGuard_SkewUsesFreshCLIVersionOverMemo(t *testing.T) {
+	key, err := modelProbeBinaryKey("sh")
+	if err != nil {
+		t.Skip("no resolvable command to stand in for the shim")
+	}
+	// The memoised answer the skew check must not trust: the pre-upgrade version,
+	// equal to the server's, so a memo-reading check would see no skew at all.
+	openCodeVersionMemo.Store(key, openCodeVersionAnswer{major: 2, ok: true, version: "2.1.0"})
+	t.Cleanup(func() { openCodeVersionMemo.Delete(key) })
+	prevProbe := probeOpenCodeCLIVersion
+	probeOpenCodeCLIVersion = openCodeCLIVersion
+	prevRun := runOpenCodeVersionCommand
+	runOpenCodeVersionCommand = func(string, ...string) ([]byte, error) {
+		return []byte("opencode v2.1.4\n"), nil
+	}
+	t.Cleanup(func() {
+		probeOpenCodeCLIVersion = prevProbe
+		runOpenCodeVersionCommand = prevRun
+	})
+
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true, serverVersion: "2.1.0"}
+	fake.answer.Store(true)
+	g := fake.guard(t.TempDir())
+
+	if _, ok := g.attach("sh"); !ok {
+		t.Fatal("a skewed service answers its probe; lanes keep attaching while it is replaced")
+	}
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts = %d, want 1: the stale memo answered 2.1.0, the fresh probe answers 2.1.4", got)
+	}
+}
+
+// The server's answer runs through the same normalization as the CLI's: a prefixed
+// "v2.1.0" is skew against a 2.1.4 CLI, and a prefixed "v2.1.4" is not.
+func TestOpenCodeServiceGuard_SkewNormalizesServerVersion(t *testing.T) {
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true, serverVersion: "v2.1.0"}
+	fake.answer.Store(true)
+	pinOpenCodeCLIVersion(t, "2.1.4", true)
+	lockDir := t.TempDir()
+	g := fake.guard(lockDir)
+
+	if _, ok := g.attach("opencode"); !ok {
+		t.Fatal("a service answering a prefixed version is attachable")
+	}
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts = %d, want 1: a prefixed server version still counts as skew", got)
+	}
+	if _, err := os.Stat(openCodeSkewMarker(lockDir, "2.1.0", "2.1.4")); err != nil {
+		t.Fatalf("the marker names the normalized pair: %v", err)
+	}
+
+	// The prefixed equal case stays quiet.
+	fake.serverVersion = "v2.1.4"
+	fake.advance(openCodeServiceHealthTTL)
+	if _, ok := g.attach("opencode"); !ok {
+		t.Fatal("the answering service stopped being attachable")
+	}
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts = %d for a prefixed equal version, want 1", got)
+	}
+}
+
 // The probe carries the server's own version, and stays healthy when the answer has none.
 func TestProbeOpenCodeService_ReportsServerVersion(t *testing.T) {
 	for _, tc := range []struct {
@@ -187,6 +306,7 @@ func TestProbeOpenCodeService_ReportsServerVersion(t *testing.T) {
 		want string
 	}{
 		{name: "version field", body: `{"version":"2.1.0","pid":123,"urls":[]}`, want: "2.1.0"},
+		{name: "prefixed version field, normalized at the skew check", body: `{"version":"v2.1.0","pid":123}`, want: "v2.1.0"},
 		{name: "no version field", body: `{"pid":123}`},
 		{name: "not json", body: `ok`},
 	} {
@@ -271,5 +391,47 @@ esac
 	logged, _ = os.ReadFile(calls)
 	if got := strings.Count(string(logged), "restart"); got != 1 {
 		t.Fatalf("service restart ran %d times across two processes, want 1", got)
+	}
+}
+
+// compareOpenCodeVersions orders per semver: the numeric core field by field, then
+// the prerelease, absent above present and numeric identifiers below alphanumeric.
+func TestCompareOpenCodeVersions(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want int
+	}{
+		{a: "2.1.4", b: "2.1.0", want: 1},
+		{a: "2.1.0", b: "2.1.4", want: -1},
+		{a: "2.1.4", b: "2.1.4", want: 0},
+		{a: "2.2.0", b: "2.1.9", want: 1},
+		{a: "2.1.10", b: "2.1.9", want: 1},
+		{a: "2.1.4", b: "2.1.4-rc1", want: 1},
+		{a: "2.1.4-rc1", b: "2.1.4", want: -1},
+		{a: "2.1.4-rc2", b: "2.1.4-rc1", want: 1},
+		{a: "2.1.4-rc.2", b: "2.1.4-rc.10", want: -1},
+		{a: "2.1.4-1", b: "2.1.4-alpha", want: -1},
+		{a: "2.1.4-rc.1.1", b: "2.1.4-rc.1", want: 1},
+		{a: "0.0.0-dev-42", b: "0.0.0-dev-41", want: 1},
+	} {
+		if got := compareOpenCodeVersions(tc.a, tc.b); got != tc.want {
+			t.Fatalf("compareOpenCodeVersions(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// normalizeOpenCodeVersion extracts the same token from either side's answer.
+func TestNormalizeOpenCodeVersion(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{in: "2.1.4", want: "2.1.4"},
+		{in: "v2.1.4", want: "2.1.4"},
+		{in: "opencode v2.1.4", want: "2.1.4"},
+		{in: "0.0.0-dev-42", want: "0.0.0-dev-42"},
+		{in: "dev", want: ""},
+		{in: "", want: ""},
+	} {
+		if got := normalizeOpenCodeVersion(tc.in); got != tc.want {
+			t.Fatalf("normalizeOpenCodeVersion(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -103,9 +104,110 @@ func probeOpenCodeBinaryVersion(binary string) openCodeVersionAnswer {
 // opencode.
 var probeOpenCodeCLIVersion = openCodeCLIVersion
 
+// runOpenCodeVersionCommand runs the fresh `--version` probe. A var so tests stub
+// the exec; TestMain pins it, and useInstalledOpenCodeCLIVersion is the only route
+// back to the real command.
+var runOpenCodeVersionCommand = runModelProbeCommand
+
+// openCodeCLIVersion answers `--version` fresh on every call. A version-manager
+// shim (mise) is the file a memo key resolves to, and it does not change when the
+// tool behind it is upgraded, so a memoised answer keeps reporting the old version
+// through the upgrade.
 func openCodeCLIVersion(binary string) (string, bool) {
-	answer := probeOpenCodeBinaryVersion(binary)
-	return answer.version, answer.version != ""
+	key, err := modelProbeBinaryKey(binary)
+	if err != nil {
+		return "", false
+	}
+	out, err := runOpenCodeVersionCommand(key.Path, "--version")
+	if err != nil {
+		return "", false
+	}
+	version := openCodeFullVersionPattern.FindString(string(out))
+	return version, version != ""
+}
+
+// normalizeOpenCodeVersion extracts the comparable version token the CLI side
+// parses, so a decorated answer ("v2.1.4") compares equal to the bare one.
+func normalizeOpenCodeVersion(version string) string {
+	return openCodeFullVersionPattern.FindString(version)
+}
+
+// compareOpenCodeVersions orders two versions the way semver does: the numeric
+// core field by field, then the prerelease, where a version without one sorts
+// above one with it and numeric identifiers sort below alphanumeric ones.
+func compareOpenCodeVersions(a, b string) int {
+	aCore, aPre := splitOpenCodeVersion(a)
+	bCore, bPre := splitOpenCodeVersion(b)
+	if c := compareOpenCodeVersionCore(aCore, bCore); c != 0 {
+		return c
+	}
+	switch {
+	case aPre == "" && bPre == "":
+		return 0
+	case aPre == "":
+		return 1
+	case bPre == "":
+		return -1
+	default:
+		return compareOpenCodeVersionPrerelease(aPre, bPre)
+	}
+}
+
+// splitOpenCodeVersion splits a normalized version into its numeric core and
+// prerelease.
+func splitOpenCodeVersion(version string) (core, pre string) {
+	core, pre, _ = strings.Cut(version, "-")
+	return core, pre
+}
+
+// compareOpenCodeVersionCore compares the dot-separated numeric fields, a missing
+// field counting as zero.
+func compareOpenCodeVersionCore(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var av, bv int
+		if i < len(as) {
+			av, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			bv, _ = strconv.Atoi(bs[i])
+		}
+		if av != bv {
+			return cmp.Compare(av, bv)
+		}
+	}
+	return 0
+}
+
+// compareOpenCodeVersionPrerelease compares dot-separated identifiers per semver:
+// a longer list of equal identifiers sorts above a shorter one.
+func compareOpenCodeVersionPrerelease(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		if c := compareOpenCodeVersionIdentifier(as[i], bs[i]); c != 0 {
+			return c
+		}
+	}
+	return cmp.Compare(len(as), len(bs))
+}
+
+// compareOpenCodeVersionIdentifier orders one prerelease identifier: numeric ones
+// numerically and below the alphanumeric ones.
+func compareOpenCodeVersionIdentifier(a, b string) int {
+	an, aErr := strconv.Atoi(a)
+	bn, bErr := strconv.Atoi(b)
+	switch {
+	case aErr == nil && bErr == nil:
+		return cmp.Compare(an, bn)
+	case aErr == nil:
+		return -1
+	case bErr == nil:
+		return 1
+	default:
+		return strings.Compare(a, b)
+	}
 }
 
 // openCodeLaunchBinary resolves the executable of the configured [opencode]

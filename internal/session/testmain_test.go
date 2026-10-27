@@ -273,6 +273,13 @@ func runTestMain(m *testing.M) int {
 	// pin, same reason: no test execs the host's opencode.
 	probeOpenCodeCLIVersion = func(string) (string, bool) { return "", false }
 
+	// The fresh `--version` exec behind that pin runs under the same rule: pinned
+	// so no test execs the host's opencode unless it stubs the exec or opts back
+	// in through useInstalledOpenCodeCLIVersion against a binary it wrote.
+	runOpenCodeVersionCommand = func(string, ...string) ([]byte, error) {
+		return nil, fmt.Errorf("opencode --version: pinned by TestMain")
+	}
+
 	// Force test profile to prevent production data corruption
 	// See CLAUDE.md: "2025-12-11 Incident: Tests with AGENTDECK_PROFILE=work overwrote ALL 36 production sessions"
 	os.Setenv("AGENTDECK_PROFILE", "_test")
