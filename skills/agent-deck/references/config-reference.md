@@ -725,7 +725,7 @@ How each harness receives the block (`documentation/HARNESS_IDENTITY.md` has the
 | `codex` | `-c developer_instructions="..."` (block inlined as a TOML basic string) | appends to the developer message; a configured `developer_instructions` in that `CODEX_HOME/config.toml` is merged in first; the built-in instructions are never replaced; custom codex commands get the env var only |
 | `pi` | `--append-system-prompt <file>` | also on `session fork` |
 | `gemini` | `--include-directories <dir>` (dir holds `GEMINI.md`) | only when gemini's folder trust is off or a `TRUST_FOLDER` rule in `~/.gemini/trustedFolders.json` covers `<data-dir>/agent-deck/runtime/identity`; otherwise the flag is withheld (the trust dialog would swallow `launch -m`), the pane prints the rule to add, and only the env var is set |
-| `opencode` | `OPENCODE_CONFIG_CONTENT={"instructions":["<file>"]}` | merged with your opencode config; skipped (env var only) when you already export `OPENCODE_CONFIG_CONTENT` |
+| `opencode` | Local 2.x shared service: session environment and `agent-deck-identity` instruction entry | Session binding preserves user config and other instruction entries. Version 1.x, private-service, and remote launches keep the config-content mechanism |
 | `copilot` | `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` += `<session dir>/copilot` (holds `AGENTS.md`) | appended to your value |
 | anything else (`--cmd`, cursor, crush, hermes, ...) | `AGENTDECK_IDENTITY_FILE` env var only | the file is still written and current; these tools' only knobs would replace your config |
 

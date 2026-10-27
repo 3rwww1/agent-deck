@@ -114,14 +114,10 @@ func (i *Instance) buildOpenCodeV2Command(command string) string {
 	if sessionID != "" {
 		quotedID := shellescape.Quote(sessionID)
 		steps := openCodeV2OptionCommands(bin, quotedID, opts)
-		steps = append(steps, fmt.Sprintf("%s -s %s", bin, quotedID))
+		steps = append(steps, fmt.Sprintf("%s -s %s", i.attachOpenCodeSessionToSharedService(bin, quotedID, false), quotedID))
 		return strings.Join(steps, " && ")
 	}
-	if opts.SessionMode == "continue" && opts.Model == "" && opts.Agent == "" {
-		// The TUI selects the last session; do not create a replacement for it.
-		return bin + " -c"
-	}
-	if opts.Model == "" && opts.Agent == "" {
+	if opts.SessionMode != "continue" && opts.Model == "" && opts.Agent == "" {
 		return bin
 	}
 	body := map[string]any{"title": i.Title, "location": map[string]string{"directory": i.ProjectPath}}
@@ -153,7 +149,7 @@ func (i *Instance) buildOpenCodeV2Command(command string) string {
 	steps = append(steps,
 		`if [ -z "$new_id" ]; then echo 'OpenCode create did not return a session id' >&2; exit 1; fi`,
 		`if [ -n "$TMUX" ]; then tmux set-environment OPENCODE_SESSION_ID "$new_id" 2>/dev/null || true; fi`,
-		fmt.Sprintf(`exec %s -s "$new_id"`, bin),
+		fmt.Sprintf(`%s -s "$new_id"`, i.attachOpenCodeSessionToSharedService(bin, `"$new_id"`, false)),
 	)
 	return strings.Join(steps, " && ")
 }
