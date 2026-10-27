@@ -833,6 +833,12 @@ func (i *Instance) CreateForkedOpenCodeInstanceWithOptionsAndWorkDir(
 			sessionLog.Warn("set_opencode_options_failed", slog.String("error", err.Error()))
 		}
 	}
+	if childID != "" {
+		launcher := quoteOpenCodeArg(forked.openCodeForkBinary())
+		cmd = fmt.Sprintf("cd %s && { %s%s -s %s; }", shellescape.Quote(workDir), forked.openCodeV2SessionEnvExports(),
+			forked.attachOpenCodeSessionToSharedService(launcher, shellescape.Quote(childID), false), shellescape.Quote(childID))
+		forked.ForkStartCommand = cmd
+	}
 
 	return forked, cmd, nil
 }
