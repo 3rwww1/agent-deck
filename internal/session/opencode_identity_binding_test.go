@@ -17,6 +17,13 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
+// TestMain also changes HOME, so capture the Go caches before either isolation layer runs.
+var openCodeIdentityBuildCaches, openCodeIdentityBuildCachesErr = func() ([]byte, error) {
+	cmd := exec.Command("go", "env", "GOMODCACHE", "GOCACHE")
+	cmd.Env = childenv.ForLaunch("")
+	return cmd.Output()
+}()
+
 func TestOpenCodeIdentitySharedServiceLaunchBoundary(t *testing.T) {
 	identityTestEnv(t)
 	pinOpenCodeMajorVersion(t, 2, true)
@@ -57,11 +64,27 @@ func TestOpenCodeIdentitySharedServiceLaunchBoundary(t *testing.T) {
 }
 
 func TestOpenCodeIdentitySharedServiceTwoSessionsAndResume(t *testing.T) {
+	testOpenCodeIdentitySharedServiceTwoSessionsAndResume(t, false)
+}
+
+func TestOpenCodeIdentitySharedServiceForkFirstStart(t *testing.T) {
+	testOpenCodeIdentitySharedServiceTwoSessionsAndResume(t, true)
+}
+
+func testOpenCodeIdentitySharedServiceTwoSessionsAndResume(t *testing.T, fork bool) {
+	t.Helper()
+	if openCodeIdentityBuildCachesErr != nil {
+		t.Fatalf("resolve fixture Go caches: %v", openCodeIdentityBuildCachesErr)
+	}
+	caches := strings.Split(strings.TrimSpace(string(openCodeIdentityBuildCaches)), "\n")
+	if len(caches) != 2 || caches[0] == "" || caches[1] == "" {
+		t.Fatal("invalid fixture Go caches")
+	}
 	identityTestEnv(t)
 	pinOpenCodeMajorVersion(t, 2, true)
 	bin := t.TempDir()
 	build := exec.Command("go", "build", "-o", filepath.Join(bin, "agent-deck"), "../../cmd/agent-deck")
-	build.Env = childenv.ForLaunch("")
+	build.Env = append(childenv.ForLaunch(""), "GOMODCACHE="+caches[0], "GOCACHE="+caches[1])
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build fixture binary: %v\n%s", err, out)
 	}
@@ -121,6 +144,23 @@ func TestOpenCodeIdentitySharedServiceTwoSessionsAndResume(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if fork && r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_A/fork" {
+			entries["ses_B"] = map[string]string{}
+			for key, value := range entries["ses_A"] {
+				entries["ses_B"][key] = value
+			}
+			metadata["ses_B"]["parentID"] = "ses_A"
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": metadata["ses_B"]})
+			return
+		}
+		if fork && r.Method == http.MethodPatch && r.URL.Path == "/api/session/ses_B" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if fork && r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_B/move" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.Method == http.MethodGet && len(parts) == 3 && parts[1] == "session" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": metadata[parts[2]]})
 			return
@@ -159,15 +199,41 @@ func TestOpenCodeIdentitySharedServiceTwoSessionsAndResume(t *testing.T) {
 	g.markHealthy(openCodeService{URL: srv.URL})
 	g.mu.Unlock()
 	for round := 0; round < 2; round++ {
-		for _, inst := range instances {
+		for index, inst := range instances {
+			if fork && round == 0 && index == 1 {
+				instances[0].OpenCodeDetectedAt = time.Now()
+				child, _, err := instances[0].CreateForkedOpenCodeInstanceWithOptionsAndWorkDir(inst.Title, inst.GroupPath, &OpenCodeOptions{}, inst.ProjectPath, "", "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				child.ParentSessionID = instances[0].ID
+				child.tmuxSession = inst.tmuxSession
+				paneEnvironments[child.ID] = paneEnvironments[inst.ID]
+				instances[index] = child
+				inst = child
+				if err := storage.SaveWithGroups(instances, NewGroupTreeWithGroups(instances, nil)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := inst.Command
+			if inst.IsForkAwaitingStart {
+				command = inst.consumeForkStartCommand()
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			launch := exec.CommandContext(ctx, "sh", "-c", inst.buildOpenCodeCommand("opencode"))
+			launch := exec.CommandContext(ctx, "sh", "-c", inst.buildOpenCodeCommand(command))
 			launch.Dir = inst.ProjectPath
 			launch.Env = append(childenv.ForSelfReexec(), paneEnvironments[inst.ID]...)
 			out, err := launch.CombinedOutput()
 			cancel()
 			if err != nil {
 				t.Fatalf("launch %s: %v\n%s", inst.ID, err, out)
+			}
+			if fork && round == 0 && index == 1 {
+				mu.Lock()
+				if environments[inst.OpenCodeSessionID]["AGENTDECK_INSTANCE_ID"] != inst.ID || !strings.Contains(entries[inst.OpenCodeSessionID]["agent-deck-identity"], inst.BuildIdentityPrompt()) {
+					t.Error("fork first start retained parent identity instead of binding child")
+				}
+				mu.Unlock()
 			}
 		}
 	}
@@ -194,10 +260,16 @@ func TestOpenCodeIdentitySharedServiceTwoSessionsAndResume(t *testing.T) {
 		instruction := entries[inst.OpenCodeSessionID]["agent-deck-identity"]
 		other := instances[1-index]
 		guidance := []string{"keep first guidance", "keep second guidance"}[index]
+		if fork && index == 1 {
+			guidance = "keep first guidance"
+		}
 		if !strings.Contains(instruction, inst.BuildIdentityPrompt()) || strings.Contains(instruction, "- session id: "+other.ID) || entries[inst.OpenCodeSessionID]["user-guidance"] != guidance {
 			t.Errorf("%s: model instructions missing, leaked or replaced user guidance", inst.ID)
 		}
 		for key, value := range unchanged {
+			if fork && index == 1 && key == "parentID" {
+				value = "ses_A"
+			}
 			if metadata[inst.OpenCodeSessionID][key] != value {
 				t.Errorf("binding changed %s", key)
 			}
