@@ -121,7 +121,11 @@ func testOpenCodeIdentitySharedServiceTwoSessionsAndResume(t *testing.T, fork bo
 		}
 		paneEnvironments[inst.ID] = []string{"TMUX=" + fields[0], "TMUX_PANE=" + fields[1]}
 	}
-	if err := storage.SaveWithGroups(instances, NewGroupTreeWithGroups(instances, nil)); err != nil {
+	stored := instances
+	if fork {
+		stored = instances[:1]
+	}
+	if err := storage.SaveWithGroups(stored, NewGroupTreeWithGroups(stored, nil)); err != nil {
 		t.Fatal(err)
 	}
 	var mu sync.Mutex
