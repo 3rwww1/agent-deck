@@ -3,6 +3,7 @@ package session
 import (
 	"cmp"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -109,21 +110,36 @@ var probeOpenCodeCLIVersion = openCodeCLIVersion
 // back to the real command.
 var runOpenCodeVersionCommand = runModelProbeCommand
 
-// openCodeCLIVersion answers `--version` fresh on every call. A version-manager
-// shim (mise) is the file a memo key resolves to, and it does not change when the
-// tool behind it is upgraded, so a memoised answer keeps reporting the old version
-// through the upgrade.
+// openCodeCLIVersion answers `--version` fresh on every call, running the command
+// by the path found on PATH, links left in place: a version-manager shim is a link
+// to the version manager, which dispatches on the name it was called by, so
+// following the link would ask the version manager for its own version. No memo:
+// the shim file does not change when the tool behind it is upgraded.
 func openCodeCLIVersion(binary string) (string, bool) {
-	key, err := modelProbeBinaryKey(binary)
+	path, err := openCodeCommandPath(binary)
 	if err != nil {
 		return "", false
 	}
-	out, err := runOpenCodeVersionCommand(key.Path, "--version")
+	out, err := runOpenCodeVersionCommand(path, "--version")
 	if err != nil {
 		return "", false
 	}
 	version := openCodeFullVersionPattern.FindString(string(out))
 	return version, version != ""
+}
+
+// openCodeCommandPath resolves a configured command the way the pane and the
+// service actions run it: the path found on PATH, made absolute, with symlinks
+// left in place so a shim keeps the name it was called by.
+func openCodeCommandPath(binary string) (string, error) {
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		return "", err
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return path, nil
 }
 
 // normalizeOpenCodeVersion extracts the comparable version token the CLI side
@@ -194,8 +210,22 @@ func compareOpenCodeVersionPrerelease(a, b string) int {
 }
 
 // compareOpenCodeVersionIdentifier orders one prerelease identifier: numeric ones
-// numerically and below the alphanumeric ones.
+// numerically and below the alphanumeric ones. Hyphenated identifiers compare
+// their parts, so a dev channel's dev-100 sorts above dev-99, not as text.
 func compareOpenCodeVersionIdentifier(a, b string) int {
+	as := strings.Split(a, "-")
+	bs := strings.Split(b, "-")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		if c := compareOpenCodeVersionSegment(as[i], bs[i]); c != 0 {
+			return c
+		}
+	}
+	return cmp.Compare(len(as), len(bs))
+}
+
+// compareOpenCodeVersionSegment orders one part of a prerelease identifier:
+// numeric parts numerically and below the alphanumeric ones.
+func compareOpenCodeVersionSegment(a, b string) int {
 	an, aErr := strconv.Atoi(a)
 	bn, bErr := strconv.Atoi(b)
 	switch {

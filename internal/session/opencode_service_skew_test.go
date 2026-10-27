@@ -109,6 +109,7 @@ func TestOpenCodeServiceGuard_SameVersionNeverRestarts(t *testing.T) {
 		{name: "server reports no version", serverVersion: "", cliVersion: "2.1.4", cliKnown: true},
 		{name: "installed version unknown", serverVersion: "2.1.0", cliKnown: false},
 		{name: "installed cli older than the server", serverVersion: "2.1.4", cliVersion: "2.1.0", cliKnown: true},
+		{name: "leading zero equal version", serverVersion: "2.1.04", cliVersion: "2.1.4", cliKnown: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true, serverVersion: tc.serverVersion}
@@ -298,6 +299,70 @@ func TestOpenCodeServiceGuard_SkewNormalizesServerVersion(t *testing.T) {
 	}
 }
 
+// A version-manager shim is a link to the version manager, which dispatches on the
+// name it was called by: the probe must run the shim's name, or it reads the
+// version manager's own version, finds it newer than any server, and restarts a
+// healthy service after every deploy.
+func TestOpenCodeServiceGuard_SkewProbeRunsShimNotItsTarget(t *testing.T) {
+	dir := t.TempDir()
+	toolVersion := filepath.Join(dir, "version")
+	if err := os.WriteFile(toolVersion, []byte("opencode v2.1.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "multicall")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$(basename "$0")" in
+opencode) cat %q ;;
+*) echo '2026.10.19 macos-arm64' ;;
+esac
+`, toolVersion)
+	if err := os.WriteFile(target, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(dir, "opencode")
+	if err := os.Symlink(target, shim); err != nil {
+		t.Fatal(err)
+	}
+	// The real resolve-and-exec path: the decision must go through the shim's name.
+	prevProbe := probeOpenCodeCLIVersion
+	probeOpenCodeCLIVersion = openCodeCLIVersion
+	prevRun := runOpenCodeVersionCommand
+	runOpenCodeVersionCommand = runModelProbeCommand
+	t.Cleanup(func() {
+		probeOpenCodeCLIVersion = prevProbe
+		runOpenCodeVersionCommand = prevRun
+	})
+
+	fake := &stubOpenCodeService{now: time.Unix(1_000_000, 0), registered: true, serverVersion: "2.1.4"}
+	fake.answer.Store(true)
+	lockDir := t.TempDir()
+	g := fake.guard(lockDir)
+
+	// A healthy service on the shim's own version: no restart.
+	if _, ok := g.attach(shim); !ok {
+		t.Fatal("the healthy service is attachable")
+	}
+	if got := fake.restarts.Load(); got != 0 {
+		t.Fatalf("restarts = %d, want 0: the probe asked the version manager, not the shim", got)
+	}
+
+	// A real upgrade behind the shim: the shim answers a newer version, and the
+	// one restart the pair allows happens.
+	if err := os.WriteFile(toolVersion, []byte("opencode v2.1.5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake.advance(openCodeServiceHealthTTL)
+	if _, ok := g.attach(shim); !ok {
+		t.Fatal("the answering service is attachable")
+	}
+	if got := fake.restarts.Load(); got != 1 {
+		t.Fatalf("restarts = %d, want 1: the shim's answer must decide", got)
+	}
+	if _, err := os.Stat(openCodeSkewMarker(lockDir, "2.1.4", "2.1.5")); err != nil {
+		t.Fatalf("the restarted pair left no marker: %v", err)
+	}
+}
+
 // The probe carries the server's own version, and stays healthy when the answer has none.
 func TestProbeOpenCodeService_ReportsServerVersion(t *testing.T) {
 	for _, tc := range []struct {
@@ -413,6 +478,8 @@ func TestCompareOpenCodeVersions(t *testing.T) {
 		{a: "2.1.4-1", b: "2.1.4-alpha", want: -1},
 		{a: "2.1.4-rc.1.1", b: "2.1.4-rc.1", want: 1},
 		{a: "0.0.0-dev-42", b: "0.0.0-dev-41", want: 1},
+		{a: "0.0.0-dev-100", b: "0.0.0-dev-99", want: 1},
+		{a: "2.1.04", b: "2.1.4", want: 0},
 	} {
 		if got := compareOpenCodeVersions(tc.a, tc.b); got != tc.want {
 			t.Fatalf("compareOpenCodeVersions(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
@@ -427,6 +494,7 @@ func TestNormalizeOpenCodeVersion(t *testing.T) {
 		{in: "v2.1.4", want: "2.1.4"},
 		{in: "opencode v2.1.4", want: "2.1.4"},
 		{in: "0.0.0-dev-42", want: "0.0.0-dev-42"},
+		{in: "2.1.4+build.1", want: "2.1.4"},
 		{in: "dev", want: ""},
 		{in: "", want: ""},
 	} {

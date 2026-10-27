@@ -40,8 +40,11 @@ func (g *openCodeServiceGuard) reconcileOpenCodeSkew(locksDir, binary string, ou
 	if installedVersion == serverVersion {
 		return
 	}
-	if compareOpenCodeVersions(installedVersion, serverVersion) < 0 {
-		sessionLog.Debug("opencode_service_version_skew_older_cli",
+	if compareOpenCodeVersions(installedVersion, serverVersion) <= 0 {
+		// Never toward an older or equally ordered version: another instance may
+		// resolve an older CLI against the newer service a restart just installed,
+		// and an equally ordered version written differently (2.1.04) is not a skew.
+		sessionLog.Debug("opencode_service_version_skew_not_newer",
 			slog.String("server_version", serverVersion), slog.String("cli_version", installedVersion))
 		return
 	}
