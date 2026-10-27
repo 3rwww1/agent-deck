@@ -25,8 +25,7 @@
 //	pi      --append-system-prompt <file>
 //	gemini  --include-directories <dir>   (the dir holds GEMINI.md; loaded
 //	        as hierarchical project memory alongside the project's own)
-//	opencode OPENCODE_CONFIG_CONTENT={"instructions":["<file>"]} (merged
-//	        into the user's config; skipped when the user already sets it)
+//	opencode local 2.x: session instruction entry; legacy/private/remote: OPENCODE_CONFIG_CONTENT
 //	copilot COPILOT_CUSTOM_INSTRUCTIONS_DIRS += <dir holding AGENTS.md>
 //	other   AGENTDECK_IDENTITY_FILE=<file> in the environment only (hermes,
 //	        cursor, crush: their only knobs replace user config, see
@@ -651,9 +650,15 @@ func (i *Instance) identityEnvExport() string {
 	}
 	dir, file, ok := i.ensureIdentityFile()
 	if !ok {
+		if i.Tool == "opencode" && i.openCodeRejectsV1LaunchFlags() {
+			return "unset " + IdentityFileEnv
+		}
 		return ""
 	}
 	out := "export " + IdentityFileEnv + "=" + shellescape.Quote(file)
+	if i.Tool == "opencode" && i.openCodeRejectsV1LaunchFlags() {
+		return out
+	}
 	opencodeJSON, _ := json.Marshal(map[string][]string{"instructions": {file}})
 	if native := identityToolEnvExports(i.Tool, shellescape.Quote(filepath.Join(dir, copilotIdentitySubdir)), shellescape.Quote(string(opencodeJSON))); native != "" {
 		out += " && " + native
