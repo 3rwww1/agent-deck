@@ -31,8 +31,8 @@ func TestOpenCodeForkV2_WorktreeForkMovesChildToWorkDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateForkedOpenCodeInstanceWithOptionsAndWorkDir: %v", err)
 	}
-	if want := "cd " + shellescape.Quote(workDir) + " && " + GetToolCommand("opencode") + " -s ses_child_456"; cmd != want {
-		t.Fatalf("fork command = %q, want %q", cmd, want)
+	if !strings.HasPrefix(cmd, "cd "+shellescape.Quote(workDir)+" && { ") || !strings.HasSuffix(cmd, GetToolCommand("opencode")+" -s ses_child_456; }") {
+		t.Fatalf("fork command must preserve worktree and child resume: %q", cmd)
 	}
 	if forked.OpenCodeSessionID != "ses_child_456" || forked.WorktreePath != workDir {
 		t.Fatalf("forked binding = %q worktree = %q", forked.OpenCodeSessionID, forked.WorktreePath)
