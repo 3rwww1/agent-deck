@@ -2,8 +2,10 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -55,8 +57,8 @@ type openCodeServiceGuard struct {
 	now        func() time.Time
 	lockDir    func() (string, error)
 	status     func(binary string) (openCodeService, error)
-	run        func(binary, action string) error // "start"
-	probe      func(svc openCodeService) error
+	run        func(binary, action string) error // "start", "restart"
+	probe      func(svc openCodeService) (version string, err error)
 	registered func() (openCodeService, error)
 }
 
@@ -130,7 +132,7 @@ type checkOutcome struct {
 	err          error // the final verdict, nil for a service that answered
 	disabled     bool
 	stopped      bool // the first verdict was stopped, so a start was attempted
-	started      bool // the start ran, and svc and err come from the probe after it
+	started      bool // the start or the once-per-skew restart ran, and svc and err come from the probe after it
 	probeStalled bool // the probe itself got no answer or no connection, apart from what session requests report
 }
 
@@ -151,7 +153,11 @@ func (g *openCodeServiceGuard) check(binary string) checkOutcome {
 	}
 	out := checkOutcome{svc: svc, err: err, disabled: errors.Is(err, errOpenCodeServiceDisabled)}
 	if err == nil {
-		out.err = g.probe(svc)
+		var serverVersion string
+		serverVersion, out.err = g.probe(svc)
+		if out.err == nil {
+			g.reconcileOpenCodeSkew(lock.dir, binary, &out, serverVersion)
+		}
 		out.probeStalled = isOpenCodeServiceStall(out.err)
 		return out
 	}
@@ -167,7 +173,7 @@ func (g *openCodeServiceGuard) check(binary string) checkOutcome {
 	}
 	out.started = true
 	if out.svc, out.err = g.status(binary); out.err == nil {
-		out.err = g.probe(out.svc)
+		_, out.err = g.probe(out.svc)
 	}
 	return out
 }
@@ -284,7 +290,10 @@ func (g *openCodeServiceGuard) markHealthy(svc openCodeService) openCodeService 
 }
 
 // openCodeServiceLock serializes recovery across processes.
-type openCodeServiceLock struct{ f *os.File }
+type openCodeServiceLock struct {
+	dir string
+	f   *os.File
+}
 
 func (g *openCodeServiceGuard) lock() (*openCodeServiceLock, error) {
 	dir, err := g.lockDir()
@@ -302,7 +311,7 @@ func (g *openCodeServiceGuard) lock() (*openCodeServiceLock, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	return &openCodeServiceLock{f: f}, nil
+	return &openCodeServiceLock{dir: dir, f: f}, nil
 }
 
 func (l *openCodeServiceLock) release() {
@@ -314,6 +323,7 @@ func runOpenCodeServiceAction(binary, action string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), openCodeServiceActionTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "service", action)
+	cmd.Env = childenv.ForLaunch("")
 	cmd.WaitDelay = 500 * time.Millisecond
 	return cmd.Run()
 }
@@ -326,12 +336,14 @@ var (
 )
 
 // probeOpenCodeService makes the same probe an attached TUI makes before it starts.
-func probeOpenCodeService(svc openCodeService) error {
+// The version comes off the same /api/info answer, so the guard compares what the
+// running server reports without a second request; "" when the answer carries none.
+func probeOpenCodeService(svc openCodeService) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), openCodeServiceHealthTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, svc.URL+"/api/info", nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if svc.Password != "" {
 		req.SetBasicAuth("opencode", svc.Password)
@@ -339,15 +351,25 @@ func probeOpenCodeService(svc openCodeService) error {
 	resp, err := openCodeSessionHTTPClient.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return errOpenCodeServiceSilent
+			return "", errOpenCodeServiceSilent
 		}
-		return fmt.Errorf("%w: %w", errOpenCodeServiceUnreachable, err)
+		return "", fmt.Errorf("%w: %w", errOpenCodeServiceUnreachable, err)
 	}
-	_ = resp.Body.Close()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("opencode service health probe: HTTP %s", resp.Status)
+		return "", fmt.Errorf("opencode service health probe: HTTP %s", resp.Status)
 	}
-	return nil
+	body, err := io.ReadAll(io.LimitReader(resp.Body, openCodeSessionResponseLimit))
+	if err != nil {
+		return "", err
+	}
+	var info struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(body, &info) != nil {
+		return "", nil
+	}
+	return info.Version, nil
 }
 
 // attachOpenCodeToSharedService leaves the password to the pane's shell, out of the stored command.
