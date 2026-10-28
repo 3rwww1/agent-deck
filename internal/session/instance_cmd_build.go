@@ -871,6 +871,7 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 	if cmd, ok := i.openCodeLauncher(baseCommand); ok {
 		var extraFlags string
 		if i.openCodeRejectsV1LaunchFlags() {
+			envPrefix += i.openCodeV2SessionEnvExports()
 			if i.openCodeV2LaunchesBare() {
 				i.bindMintedOpenCodeSession()
 			}
@@ -879,7 +880,7 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 			i.setOpenCodePort(0)
 			if i.OpenCodeSessionID != "" && !i.openCodeV2HasSessionOptions() {
 				return envPrefix + fmt.Sprintf("%s -s %s%s",
-					i.attachOpenCodeToSharedService(cmd), i.OpenCodeSessionID, i.openCodeResumeDirArg())
+					i.attachOpenCodeSessionToSharedService(cmd, shellescape.Quote(i.OpenCodeSessionID), true), i.OpenCodeSessionID, i.openCodeResumeDirArg())
 			}
 			return envPrefix + i.buildOpenCodeV2Command(cmd)
 		} else {
@@ -903,6 +904,15 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 	// process (issue #1614). Status falls back to tmux content sniffing.
 	i.setOpenCodePort(0)
 	return envPrefix + baseCommand
+}
+
+func (i *Instance) openCodeV2SessionEnvExports() string {
+	prefix := fmt.Sprintf("export AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s AGENTDECK_TITLE=%s AGENTDECK_TOOL=opencode AGENTDECK_ACCOUNT=%s; ",
+		shellescape.Quote(i.ID), shellescape.Quote(sessionProfileEnvValue()), shellescape.Quote(i.Title), shellescape.Quote(i.Account))
+	if !i.identityInjectionEnabled() {
+		prefix += "unset AGENTDECK_IDENTITY_FILE; "
+	}
+	return prefix
 }
 
 // buildOpenCodeExtraFlags returns extra CLI flags from OpenCodeOptions (model, agent).
