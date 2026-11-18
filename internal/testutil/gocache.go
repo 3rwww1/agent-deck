@@ -3,7 +3,9 @@ package testutil
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"testing"
 )
 
 // PinGoCaches exports GOCACHE and GOMODCACHE with the values the go command
@@ -31,5 +33,25 @@ func PinGoCaches() {
 		if i < len(values) && os.Getenv(name) == "" && strings.TrimSpace(values[i]) != "" {
 			_ = os.Setenv(name, strings.TrimSpace(values[i]))
 		}
+	}
+}
+
+// TurnOffGoTelemetry writes the Go telemetry mode file under the current user
+// config dir. Call it after HOME moves to a t.TempDir() and before a go command
+// runs there: otherwise a detached telemetry child can still be writing in that
+// dir when the TempDir cleanup removes it. GOTELEMETRY=off does not help: the
+// go command never reads that variable.
+func TurnOffGoTelemetry(t testing.TB) {
+	t.Helper()
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("resolving the user config dir: %v", err)
+	}
+	mode := filepath.Join(dir, "go", "telemetry", "mode")
+	if err := os.MkdirAll(filepath.Dir(mode), 0o700); err != nil {
+		t.Fatalf("creating the go telemetry dir: %v", err)
+	}
+	if err := os.WriteFile(mode, []byte("off"), 0o600); err != nil {
+		t.Fatalf("writing the go telemetry mode file: %v", err)
 	}
 }
