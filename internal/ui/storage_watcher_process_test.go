@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
+	"github.com/asheshgoplani/agent-deck/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,6 +31,7 @@ func TestStorageWatcherRealProcessesOneRefresh(t *testing.T) {
 	require.NoError(t, watcherBuildCacheErr)
 	t.Setenv("GOMODCACHE", "") // Reproduce CI with no explicit cache after HOME changes.
 	h, storage, inst := newWatcherEffectsHome(t)
+	testutil.TurnOffGoTelemetry(t)
 	w, err := NewStorageWatcher(storage.GetDB())
 	require.NoError(t, err)
 	defer w.Close()
@@ -105,8 +107,12 @@ func watcherBuildEnvironment(base []string) []string {
 	}
 	return append(env, "GOCACHE="+watcherBuildCaches["GOCACHE"], "GOMODCACHE="+watcherBuildCaches["GOMODCACHE"])
 }
+
 func TestStorageWatcherBuildCacheDefaultsSurviveHomeIsolation(t *testing.T) {
 	harness := t.TempDir()
+	t.Setenv("HOME", harness)
+	t.Setenv("XDG_CACHE_HOME", "")
+	testutil.TurnOffGoTelemetry(t)
 	var env []string
 	for _, value := range os.Environ() {
 		key, _, _ := strings.Cut(value, "=")
@@ -120,8 +126,6 @@ func TestStorageWatcherBuildCacheDefaultsSurviveHomeIsolation(t *testing.T) {
 	caches, err := resolveWatcherBuildCaches(env)
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(harness, "go", "pkg", "mod"), caches["GOMODCACHE"])
-	t.Setenv("HOME", harness)
-	t.Setenv("XDG_CACHE_HOME", "")
 	cacheRoot, err := os.UserCacheDir()
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(cacheRoot, "go-build"), caches["GOCACHE"])
