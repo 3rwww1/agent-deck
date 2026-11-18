@@ -1,15 +1,19 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"al.essio.dev/pkg/shellescape"
+	"github.com/asheshgoplani/agent-deck/internal/childenv"
 )
 
 func fakeOpenCodeForkService(t *testing.T, childID string, exitCode int) string {
@@ -61,8 +65,8 @@ func TestOpenCodeForkV2_UsesConfiguredBinary(t *testing.T) {
 	// The first tmux launch must run the configured binary too: a bare
 	// `opencode` is not on this PATH (or could be a 1.x binary that does not
 	// know the 2.x child session).
-	if want := "cd " + shellescape.Quote(workDir) + " && " + stub + " -s ses_child_456"; cmd != want {
-		t.Fatalf("fork command = %q, want %q", cmd, want)
+	if !strings.HasPrefix(cmd, "cd "+shellescape.Quote(workDir)+" && { ") || !strings.HasSuffix(cmd, stub+" -s ses_child_456; }") {
+		t.Fatalf("fork command must preserve work directory and configured binary: %q", cmd)
 	}
 	gotArgv, err := os.ReadFile(argv)
 	if err != nil {
@@ -87,8 +91,8 @@ func TestOpenCodeForkV2_ForksThroughServiceAndResumesChild(t *testing.T) {
 		t.Fatalf("CreateForkedOpenCodeInstanceWithOptions: %v", err)
 	}
 
-	if want := "cd " + shellescape.Quote(workDir) + " && " + GetToolCommand("opencode") + " -s ses_child_456"; cmd != want {
-		t.Fatalf("fork command = %q, want %q (no --fork, no -m/--agent on 2.x)", cmd, want)
+	if !strings.HasPrefix(cmd, "cd "+shellescape.Quote(workDir)+" && { ") || !strings.HasSuffix(cmd, GetToolCommand("opencode")+" -s ses_child_456; }") || strings.Contains(cmd, " --fork") || strings.Contains(cmd, " -m ") || strings.Contains(cmd, " --agent ") {
+		t.Fatalf("fork command must preserve child resume without 1.x flags: %q", cmd)
 	}
 	if forked.OpenCodeSessionID != "ses_child_456" || forked.OpenCodeDetectedAt.IsZero() {
 		t.Fatalf("forked instance must be bound to the child session up front; got id=%q detected=%v",
@@ -122,6 +126,78 @@ func TestOpenCodeForkV2_ServiceFailureIsAnError(t *testing.T) {
 
 	if _, _, err := parent.CreateForkedOpenCodeInstanceWithOptions("oc fork", "", nil); err == nil {
 		t.Fatal("expected an error when the service fork call fails, got nil")
+	}
+}
+
+func TestOpenCodeForkV2_LaunchPrerequisiteFailure(t *testing.T) {
+	for _, prerequisite := range []string{"directory", "environment source"} {
+		t.Run(prerequisite, func(t *testing.T) {
+			shell, err := exec.LookPath("sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			pinOpenCodeMajorVersion(t, 2, true)
+			argv := fakeOpenCodeForkService(t, "ses_child_456", 0)
+			g := useFreshOpenCodeServiceGuard(t)
+			g.registered = func() (openCodeService, error) { return openCodeService{}, errOpenCodeServiceStopped }
+			g.status = func(string) (openCodeService, error) {
+				return openCodeService{}, fmt.Errorf("fixture service discovery unavailable")
+			}
+			bin := t.TempDir()
+			binding := filepath.Join(bin, "binding")
+			if err := os.WriteFile(filepath.Join(bin, "agent-deck"), []byte("#!/bin/sh\nprintf 'bound\\n' > "+shellescape.Quote(binding)+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("AGENTDECK_INSTANCE_ID", "parent_lane")
+			workDir := t.TempDir()
+			parent := NewInstanceWithTool("oc", workDir, "opencode")
+			parent.OpenCodeSessionID = "ses_parent_123"
+			parent.OpenCodeDetectedAt = time.Now()
+			if prerequisite == "environment source" {
+				configPath, err := GetUserConfigPath()
+				if err != nil {
+					t.Fatal(err)
+				}
+				config, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(configPath, append(config, []byte("\n[shell]\ninit_script = 'false'\n")...), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				ClearUserConfigCache()
+			}
+			child, _, err := parent.CreateForkedOpenCodeInstanceWithOptionsAndWorkDir("oc fork", "", &OpenCodeOptions{}, workDir, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prerequisite == "directory" {
+				if err := os.Remove(workDir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.ReadFile(argv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			launch := exec.CommandContext(ctx, shell, "-c", child.buildOpenCodeCommand(child.consumeForkStartCommand()))
+			launch.Env = childenv.ForSelfReexec()
+			out, err := launch.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() <= 0 || ctx.Err() != nil {
+				t.Fatalf("want nonzero shell exit for failed prerequisite, got %v: %s", err, out)
+			}
+			if _, err := os.Stat(binding); !os.IsNotExist(err) {
+				t.Fatal("failed prerequisite reached child binding")
+			}
+			after, err := os.ReadFile(argv)
+			if err != nil || string(after) != string(before) {
+				t.Fatal("failed prerequisite reached OpenCode launch")
+			}
+		})
 	}
 }
 
