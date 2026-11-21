@@ -158,3 +158,13 @@ func (i *Instance) buildOpenCodeV2Command(command string) string {
 	)
 	return strings.Join(steps, " && ")
 }
+
+// openCodeV2HasSessionOptions reports a model or agent the launch must switch to first.
+func (i *Instance) openCodeV2HasSessionOptions() bool {
+	opts := i.GetOpenCodeOptions()
+	if opts == nil {
+		cfg, _ := LoadUserConfig()
+		opts = NewOpenCodeOptions(cfg)
+	}
+	return opts.Model != "" || opts.Agent != ""
+}
