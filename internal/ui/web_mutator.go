@@ -669,6 +669,12 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 		}
 	}
 	for field, value := range updates {
+		if field == session.FieldTitle {
+			if err := session.CheckUniquePath(m.h.instances, inst, inst.GroupPath, value); err != nil {
+				m.h.instancesMu.Unlock()
+				return nil, false, err
+			}
+		}
 		oldValue, postCommit, err := session.SetField(inst, field, value, nil)
 		if err != nil {
 			m.h.instancesMu.Unlock()
@@ -889,6 +895,10 @@ func (m *WebMutator) MoveSessionToGroup(id, groupPath string) (string, bool, err
 		m.h.groupTree.DefaultMaxConcurrent = cfg.GroupDefaults.MaxConcurrent
 	}
 	target := m.h.groupTree.ResolveMoveTargetGroup(groupPath)
+	if err := session.CheckUniquePath(m.h.instances, inst, target, inst.Title); err != nil {
+		m.h.instancesMu.Unlock()
+		return "", false, err
+	}
 	restartRequired := session.IsClaudeCompatible(inst.Tool) &&
 		session.GetClaudeConfigDirForInstanceInGroup(inst, target) != session.GetClaudeConfigDirForInstance(inst)
 	m.h.groupTree.MoveSessionToGroup(inst, target)

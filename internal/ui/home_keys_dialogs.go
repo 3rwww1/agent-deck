@@ -1343,7 +1343,14 @@ func (h *Home) handleEditSessionDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		for _, c := range orderedChanges {
-			_, postCommit, err := session.SetField(inst, c.Field, c.Value, nil)
+			var err error
+			if c.Field == session.FieldTitle {
+				err = session.CheckUniquePath(h.instances, inst, inst.GroupPath, c.Value)
+			}
+			var postCommit func()
+			if err == nil {
+				_, postCommit, err = session.SetField(inst, c.Field, c.Value, nil)
+			}
 			if err != nil {
 				h.instancesMu.Unlock()
 				h.editSessionDialog.SetError(err.Error())
@@ -1737,6 +1744,10 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Session == nil) must not reach MoveSessionToGroup or the
 				// item.Session.ID deref below — both panic (#1540).
 				if item.Type == session.ItemTypeSession && item.Session != nil {
+					if err := session.CheckUniquePath(h.groupTree.GetAllInstances(), item.Session, targetGroupPath, item.Session.Title); err != nil {
+						h.setError(err)
+						break
+					}
 					h.groupTree.MoveSessionToGroup(item.Session, targetGroupPath)
 					h.pendingGroupOps = append(h.pendingGroupOps, pendingGroupOp{
 						kind: groupOpMove, sessionID: item.Session.ID, targetPath: targetGroupPath,
@@ -1789,7 +1800,11 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					if inst := h.getInstanceByID(sessionID); inst != nil {
 						// The CLI's guard: a title another session holds at
 						// the same location is refused, here too.
-						if setErr = session.CheckTitleConflict(h.instances, inst, newName); setErr == nil {
+						setErr = session.CheckTitleConflict(h.instances, inst, newName)
+						if setErr == nil {
+							setErr = session.CheckUniquePath(h.instances, inst, inst.GroupPath, newName)
+						}
+						if setErr == nil {
 							_, postCommit, setErr = session.SetField(inst, session.FieldTitle, newName, nil)
 						}
 						locked = inst.TitleLocked

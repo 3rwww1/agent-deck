@@ -179,6 +179,10 @@ func handleSessionMove(profile string, args []string) {
 	inst.ProjectPath = newPath
 
 	if targetGroupPath != "" {
+		if err := session.CheckUniquePath(instances, inst, targetGroupPath, inst.Title); err != nil {
+			out.Error(err.Error(), ErrCodeAlreadyExists)
+			exitCLI(1)
+		}
 		groupTree.MoveSessionToGroup(inst, targetGroupPath)
 	}
 
