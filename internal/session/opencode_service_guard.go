@@ -323,7 +323,7 @@ func runOpenCodeServiceAction(binary, action string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), openCodeServiceActionTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "service", action)
-	cmd.Env = childenv.ForLaunch("")
+	cmd.Env = openCodeServiceLaunchEnv()
 	cmd.WaitDelay = 500 * time.Millisecond
 	return cmd.Run()
 }
@@ -372,26 +372,48 @@ func probeOpenCodeService(svc openCodeService) (string, error) {
 	return info.Version, nil
 }
 
-// attachOpenCodeToSharedService leaves the password to the pane's shell, out of the stored command.
-func (i *Instance) attachOpenCodeToSharedService(cmd string) string {
+func (i *Instance) attachOpenCodeSessionToSharedService(cmd, sessionID string, create bool) string {
 	binary, ok := i.openCodeLaunchBinary()
 	if !ok {
 		return cmd
 	}
+	var binding string
+	if i.ID != "" && !i.identityRunsElsewhere() {
+		binding = shellescape.Quote(agentDeckBinaryPath()) + " session bind-opencode --session-id " + sessionID
+		if create {
+			binding += " --create"
+		}
+	}
 	svc, wait, ok := sharedOpenCodeService.launchTarget(binary)
 	if !ok {
+		sharedOpenCodeService.mu.Lock()
+		disabled := sharedOpenCodeService.disabled
+		sharedOpenCodeService.mu.Unlock()
+		if disabled && !i.identityRunsElsewhere() {
+			if _, file, enabled := i.ensureIdentityFile(); enabled {
+				payload, _ := json.Marshal(map[string][]string{"instructions": {file}})
+				return identityToolEnvExports("opencode", "", shellescape.Quote(string(payload))) + " && " + cmd
+			}
+		}
+		if !disabled && binding != "" {
+			return binding + " && " + cmd
+		}
 		return cmd
 	}
 	attached := cmd + " --server " + shellescape.Quote(svc.URL)
 	if svc.Password != "" {
 		attached = `OPENCODE_PASSWORD="$(` + cmd + ` service get password)" ` + attached
 	}
+	var prefix string
 	if wait {
 		// `service status` prints the URL once the service answers; past the limit OpenCode reports it unreachable.
-		attached = fmt.Sprintf(`waited=0 && until %s service status 2>/dev/null | grep -q '^http' || [ "$waited" -ge %d ]; do waited=$((waited+1)); sleep %d; done && `,
-			cmd, openCodeServiceWaitLimit/openCodeServiceWaitPoll, int(openCodeServiceWaitPoll/time.Second)) + attached
+		prefix = fmt.Sprintf(`waited=0 && until %s service status 2>/dev/null | grep -q '^http' || [ "$waited" -ge %d ]; do waited=$((waited+1)); sleep %d; done && `,
+			cmd, openCodeServiceWaitLimit/openCodeServiceWaitPoll, int(openCodeServiceWaitPoll/time.Second))
 	}
-	return attached
+	if binding != "" {
+		prefix += binding + " --server " + shellescape.Quote(svc.URL) + " && "
+	}
+	return prefix + attached
 }
 
 // openCodeAPICommand never makes a bare api call: its service check kills a service it finds stalled.

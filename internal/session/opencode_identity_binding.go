@@ -162,3 +162,18 @@ func openCodeConfigWithoutIdentity(raw string) string {
 	out, _ := json.Marshal(config)
 	return string(out)
 }
+
+func openCodeServiceLaunchEnv() []string {
+	var environment []string
+	for _, pair := range childenv.ForLaunch("") {
+		name, value, _ := strings.Cut(pair, "=")
+		if strings.HasPrefix(name, "AGENTDECK_") || name == "TMUX" || name == "TMUX_PANE" || name == "OPENCODE_PASSWORD" || name == "OPENCODE_SERVER_PASSWORD" {
+			continue
+		}
+		if name == "OPENCODE_CONFIG_CONTENT" {
+			value = openCodeConfigWithoutIdentity(value)
+		}
+		environment = append(environment, name+"="+value)
+	}
+	return environment
+}
