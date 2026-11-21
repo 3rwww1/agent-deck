@@ -28,6 +28,8 @@ func handleSession(profile string, args []string) {
 	}
 
 	switch args[0] {
+	case "bind-opencode":
+		handleSessionBindOpenCode(args[1:])
 	case "start":
 		if coreRegistryEnabled() {
 			cliSessionStart(profile, args[1:])
