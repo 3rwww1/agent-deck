@@ -230,7 +230,7 @@ func (i *Instance) buildClaudeForkCommandForTarget(target *Instance, opts *Claud
 
 	// Build extra flags from options (for fork, we use ToArgsForFork which excludes session mode)
 	launchName := target.ClaudeLaunchName()
-	if extraArgsSupplyName(i.ExtraArgs) || extraArgsSelectSession(i.claudeExtraArgsForCommand()) {
+	if extraArgsSupplyName(i.launchExtraArgs()) || extraArgsSelectSession(i.claudeExtraArgsForCommand()) {
 		launchName = ""
 	}
 	extraFlags := i.buildClaudeExtraFlagsWithName(opts, launchName)

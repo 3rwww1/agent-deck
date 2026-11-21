@@ -763,7 +763,11 @@ func (i *Instance) buildClaudeExtraFlagsWithName(opts *ClaudeOptions, launchName
 	// fork that other conversation again on every restart. Such selectors are
 	// left out here; see stripStaleSessionSelectors for the exact rules. With
 	// no own id yet (first start) the tokens pass through unchanged.
-	for _, tok := range i.claudeExtraArgsForCommand() {
+	extraArgs := i.claudeExtraArgsForCommand()
+	if launchName != "" {
+		extraArgs = withoutNameArgs(extraArgs)
+	}
+	for _, tok := range extraArgs {
 		flags = append(flags, shellescape.Quote(tok))
 	}
 
@@ -881,6 +885,7 @@ func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
 	if cmd, ok := i.openCodeLauncher(baseCommand); ok {
 		var extraFlags string
 		if i.openCodeRejectsV1LaunchFlags() {
+			go i.pushOpenCodeNativeName(openCodeServiceWaitLimit, openCodeServiceWaitPoll)
 			// V2 uses the shared service instead of a per-TUI --port server.
 			i.setOpenCodePort(0)
 			if i.OpenCodeSessionID != "" && !i.openCodeV2HasSessionOptions() {

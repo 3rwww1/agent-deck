@@ -273,7 +273,7 @@ func (i *Instance) ResolveTitleFromClaude(sessionID string) (string, bool) {
 	// Titles are stored cleaned; compare the cleaned name, or a name with a
 	// control character would differ forever and be rewritten on every hook.
 	name = termtext.Clean(name)
-	if name == "" || name == i.Title {
+	if name == "" || name == i.Title || name == i.NativeSessionName() {
 		return "", false
 	}
 	// Issue #2678: the record may belong to a Claude running in another
