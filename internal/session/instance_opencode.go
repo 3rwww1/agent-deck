@@ -152,6 +152,7 @@ func (i *Instance) setOpenCodeSessionLocked(sessionID string) {
 	i.OpenCodeSessionID = sessionID
 	i.OpenCodeDetectedAt = time.Now()
 	i.OpenCodeStartedAt = 0
+	i.openCodeSessionIDCleared = false
 }
 
 func (i *Instance) syncOpenCodeSessionEnvironment(tmuxSession *tmux.Session, sessionID string) {

@@ -241,6 +241,7 @@ func printSessionHelp() {
 	fmt.Println("  claude-session-id  Claude conversation ID (for fork/resume)")
 	fmt.Println("  favorite           Favourite flag: true or false (favorite in list/show --json)")
 	fmt.Println("  gemini-session-id  Gemini conversation ID (for resume)")
+	fmt.Println("  opencode-session-id OpenCode session ID (for resume; empty clears it)")
 	fmt.Println("  tool-session-id    Custom [tools.*] conversation ID (resume_flag after reboot)")
 	fmt.Println()
 	fmt.Println("Set examples:")
