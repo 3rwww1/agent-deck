@@ -59,6 +59,9 @@ func (i *Instance) DetectOpenCodeSession() {
 	i.detectOpenCodeSessionAsync()
 }
 
+// Swapped by tests: the detection outlives a test and races its cleanup.
+var startOpenCodeDetectionAfterRestart = func(i *Instance) { go i.detectOpenCodeSessionAsync() }
+
 // detectOpenCodeSessionAsync detects the OpenCode session ID after startup
 // OpenCode generates session IDs internally (format: ses_XXXXX)
 // We query the managed OpenCode HTTP server (or the bounded compatibility CLI
