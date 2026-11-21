@@ -25,11 +25,13 @@ func installStaleCacheFake(t *testing.T) (dir string) {
 	writeStaleFixture(t, dir, "windows", windows.String())
 	writeStaleFixture(t, dir, "panes", panes.String())
 	writeFakeTmux(t, dir, `printf '%s\n' "$*" >> "$STALE_FIXTURE/calls"
+[ -f "$STALE_FIXTURE/linger" ] && sleep 30 &
 [ -f "$STALE_FIXTURE/down" ] && { echo 'no server running' >&2; exit 1; }
 [ -f "$STALE_FIXTURE/slow" ] && sleep 0.3
 case "$*" in
 *list-windows*) [ -f "$STALE_FIXTURE/slow-listing" ] && sleep 2.3; cat "$STALE_FIXTURE/windows";;
 *"list-panes -a"*) cat "$STALE_FIXTURE/panes";;
+*list-sessions*) cut -d"|" -f1 "$STALE_FIXTURE/windows";;
 *list-panes*) echo 0;;
 *display-message*) echo 100;;
 esac
@@ -318,5 +320,83 @@ func TestStaleCacheRefresh_SlowListingServesLaterRows(t *testing.T) {
 	}
 	if got := callCounts(t, dir); got["list-windows"] != 1 || got["has-session"] != 0 {
 		t.Fatalf("calls = %v, want one list-windows and no has-session: a slow listing was stale on arrival", got)
+	}
+}
+
+// Under bridged stdio a child of tmux keeps the output open, so a piped listing waits out tmuxSubprocessWaitDelay.
+func TestStaleCacheRefresh_LingeringChildDoesNotStallRows(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	writeStaleFixture(t, dir, "linger", "")
+	budget := tmuxSubprocessWaitDelay / 2
+
+	start := time.Now()
+	RefreshSessionCache()
+	RefreshPaneInfoCache()
+	expireSharedCaches()
+	for k := 0; k < staleRows; k++ {
+		s := staleSession(k)
+		if !s.Exists() {
+			t.Fatalf("Exists() = false on live row %d", k)
+		}
+		if s.IsPaneDead() {
+			t.Fatalf("IsPaneDead() = true on live row %d", k)
+		}
+	}
+	elapsed := time.Since(start)
+
+	got := callCounts(t, dir)
+	t.Logf("%d stale rows with a lingering child took %s: %v", staleRows, elapsed, got)
+	if elapsed > budget {
+		t.Fatalf("listings and %d stale rows took %s, over %s, while a child held the output open", staleRows, elapsed, budget)
+	}
+}
+
+func TestRefreshSessionCache_NoServerUnderLingeringChildIsEmptyListing(t *testing.T) {
+	dir := installStaleCacheFake(t)
+	writeStaleFixture(t, dir, "linger", "")
+	writeStaleFixture(t, dir, "down", "")
+
+	start := time.Now()
+	RefreshSessionCache()
+	elapsed := time.Since(start)
+
+	if exists, valid := sessionExistsFromCache("stale-0"); !valid || exists {
+		t.Fatalf("no server running read as exists=%v valid=%v, want an empty valid listing", exists, valid)
+	}
+	if budget := tmuxSubprocessWaitDelay / 2; elapsed > budget {
+		t.Fatalf("RefreshSessionCache took %s, over %s, while a child held the output open", elapsed, budget)
+	}
+}
+
+func TestListSessionsOnSocket_LingeringChildDoesNotStall(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		down bool
+		want int
+	}{
+		{name: "live server", want: staleRows},
+		{name: "no server running", down: true, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := installStaleCacheFake(t)
+			writeStaleFixture(t, dir, "linger", "")
+			if tc.down {
+				writeStaleFixture(t, dir, "down", "")
+			}
+
+			start := time.Now()
+			names, err := defaultListSessionsOnSocket(DefaultSocketName())
+			elapsed := time.Since(start)
+
+			if err != nil {
+				t.Fatalf("defaultListSessionsOnSocket() error = %v, want a complete listing", err)
+			}
+			if len(names) != tc.want {
+				t.Fatalf("defaultListSessionsOnSocket() = %d names, want %d", len(names), tc.want)
+			}
+			if budget := tmuxSubprocessWaitDelay / 2; elapsed > budget {
+				t.Fatalf("defaultListSessionsOnSocket() took %s, over %s, while a child held the output open", elapsed, budget)
+			}
+		})
 	}
 }

@@ -137,7 +137,7 @@ func RefreshSessionCache() {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
 	defer cancel()
 	cmd := tmuxExecContext(ctx, DefaultSocketName(), "list-windows", "-a", "-F", tmuxFmt("#{session_name}", "#{window_activity}", "#{window_index}", "#{window_id}", "#{window_name}"))
-	output, err := commandOutput(cmd)
+	output, err := commandOutputUnpiped(cmd)
 	// "no server running" is an authoritative empty listing, not a failed
 	// one. Caching it as invalid sent every session's status check to its
 	// own has-session fork each pass (~37 forks/s with 492 dead rows).
@@ -289,7 +289,7 @@ func defaultListSessionsOnSocket(socketName string) (map[string]struct{}, error)
 	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
 	defer cancel()
 
-	out, err := commandOutput(tmuxExecContext(ctx, socketName, "list-sessions", "-F", "#{session_name}"))
+	out, err := commandOutputUnpiped(tmuxExecContext(ctx, socketName, "list-sessions", "-F", "#{session_name}"))
 	if err != nil {
 		// "no server running" / "no sessions" are legitimate empty results; any
 		// other failure (timeout, exec error) is reported so the caller keeps
