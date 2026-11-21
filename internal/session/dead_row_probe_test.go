@@ -56,6 +56,17 @@ func requireSameVerdict(t *testing.T, got, want *Instance) {
 	}
 }
 
+// tmux.SubprocessStarts is process-wide: join the spawn watchers earlier tests left running so their tmux calls stay out of this count.
+func startsBeforeCount() int64 {
+	RetireSpawnWatchersForTest()
+	return tmux.SubprocessStarts()
+}
+
+// A pass re-lists a socket each time its listing reaches passSessionListMaxAge, which a pass slowed by load can outlast.
+func listingsPerSocket(wall time.Duration) int64 {
+	return 1 + int64(wall/passSessionListMaxAge)
+}
+
 // A row whose tmux session is gone cost a has-session and a list-panes in
 // every status pass that loads fresh instances (web menu, CLI list): two tmux
 // processes per dead row per request. One listing per socket per pass proves
@@ -84,12 +95,14 @@ func TestStatusUpdatePass_DeadRowsStartNoTmuxPerRow(t *testing.T) {
 	add("drp-both", sockB, "shell", StatusError) // live on A only: dead here
 
 	var pass StatusUpdatePass
-	before := tmux.SubprocessStarts()
+	before := startsBeforeCount()
+	t0 := time.Now()
 	for _, inst := range withPass {
 		_ = pass.UpdateStatusOnly(inst)
 	}
 	starts := tmux.SubprocessStarts() - before
-	t.Logf("tmux starts for %d dead rows on 2 sockets: %d", len(withPass), starts)
+	maxStarts := 2 * listingsPerSocket(time.Since(t0))
+	t.Logf("tmux starts for %d dead rows on 2 sockets: %d (at most %d)", len(withPass), starts, maxStarts)
 	for _, inst := range plain {
 		_ = inst.updateStatus(nil, false)
 	}
@@ -100,9 +113,9 @@ func TestStatusUpdatePass_DeadRowsStartNoTmuxPerRow(t *testing.T) {
 			t.Errorf("%s on %s: status %q for a dead row", withPass[n].ID, withPass[n].tmuxSession.SocketName, got)
 		}
 	}
-	if starts > 2 {
-		t.Fatalf("a status pass over %d dead rows on 2 sockets started %d tmux commands; want at most 2 (one listing per socket)",
-			len(withPass), starts)
+	if starts > maxStarts {
+		t.Fatalf("a status pass over %d dead rows on 2 sockets started %d tmux commands; want at most %d (one listing per socket per listing age)",
+			len(withPass), starts, maxStarts)
 	}
 }
 
@@ -138,13 +151,13 @@ func TestStatusUpdatePass_CachedLiveRowsDoNotList(t *testing.T) {
 		withPass, plain = append(withPass, p), append(plain, q)
 	}
 	tmux.RefreshExistingSessions()
-	before := tmux.SubprocessStarts()
+	before := startsBeforeCount()
 	for _, inst := range plain {
 		_ = inst.updateStatus(nil, false)
 	}
 	plainStarts := tmux.SubprocessStarts() - before
 	tmux.RefreshExistingSessions()
-	before = tmux.SubprocessStarts()
+	before = startsBeforeCount()
 	var pass StatusUpdatePass
 	for _, inst := range withPass {
 		_ = pass.UpdateStatusOnly(inst)
@@ -182,7 +195,8 @@ func TestStatusUpdatePass_ConcurrentWorkersShareOneListingPerSocket(t *testing.T
 	close(rows)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
-	before := tmux.SubprocessStarts()
+	before := startsBeforeCount()
+	t0 := time.Now()
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
@@ -196,16 +210,17 @@ func TestStatusUpdatePass_ConcurrentWorkersShareOneListingPerSocket(t *testing.T
 	close(start)
 	wg.Wait()
 	starts := tmux.SubprocessStarts() - before
-	t.Logf("tmux starts for %d dead rows on 2 sockets, %d workers: %d", len(withPass), workers, starts)
+	maxStarts := 2 * listingsPerSocket(time.Since(t0))
+	t.Logf("tmux starts for %d dead rows on 2 sockets, %d workers: %d (at most %d)", len(withPass), workers, starts, maxStarts)
 	for _, inst := range plain {
 		_ = inst.updateStatus(nil, false)
 	}
 	for n := range withPass {
 		requireSameVerdict(t, withPass[n], plain[n])
 	}
-	if starts > 2 {
-		t.Fatalf("%d workers sharing a pass over %d dead rows on 2 sockets started %d tmux commands; want at most 2 (one listing per socket)",
-			workers, len(withPass), starts)
+	if starts > maxStarts {
+		t.Fatalf("%d workers sharing a pass over %d dead rows on 2 sockets started %d tmux commands; want at most %d (one listing per socket per listing age)",
+			workers, len(withPass), starts, maxStarts)
 	}
 }
 
@@ -245,24 +260,26 @@ func TestStatusUpdatePass_UncachedLiveRowsCostOneListingPerSocket(t *testing.T) 
 		p, q := deadRowPair(name, sock, "shell")
 		withPass, plain = append(withPass, p), append(plain, q)
 	}
-	before := tmux.SubprocessStarts()
+	before := startsBeforeCount()
 	for _, inst := range plain {
 		_ = inst.updateStatus(nil, false)
 	}
 	plainStarts := tmux.SubprocessStarts() - before
-	before = tmux.SubprocessStarts()
+	before = startsBeforeCount()
+	t0 := time.Now()
 	var pass StatusUpdatePass
 	for _, inst := range withPass {
 		_ = pass.UpdateStatusOnly(inst)
 	}
 	passStarts := tmux.SubprocessStarts() - before
-	t.Logf("tmux starts for %d uncached live rows on one socket: plain %d, pass %d", len(names), plainStarts, passStarts)
+	listings := listingsPerSocket(time.Since(t0))
+	t.Logf("tmux starts for %d uncached live rows on one socket: plain %d, pass %d (at most %d listings)", len(names), plainStarts, passStarts, listings)
 	for n := range withPass {
 		requireSameVerdict(t, withPass[n], plain[n])
 	}
-	if passStarts > plainStarts+1 {
-		t.Fatalf("a pass over %d uncached live rows on one socket started %d tmux commands, plain UpdateStatus %d; want at most one listing more",
-			len(names), passStarts, plainStarts)
+	if passStarts > plainStarts+listings {
+		t.Fatalf("a pass over %d uncached live rows on one socket started %d tmux commands, plain UpdateStatus %d; want at most %d listings more",
+			len(names), passStarts, plainStarts, listings)
 	}
 }
 
@@ -383,7 +400,7 @@ func TestStatusUpdatePass_DeadLiveRowsCostOneHasSessionEach(t *testing.T) {
 		withPass, plain = append(withPass, p), append(plain, q)
 	}
 	var pass StatusUpdatePass
-	before := tmux.SubprocessStarts()
+	before := startsBeforeCount()
 	for _, inst := range withPass {
 		_ = pass.UpdateStatusOnly(inst)
 	}

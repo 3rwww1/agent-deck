@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/asheshgoplani/agent-deck/internal/testutil"
 )
 
 func TestBusDirIsProfileSpecific(t *testing.T) {
@@ -196,6 +198,7 @@ func TestCLIStatsReadsProducerDropsAcrossProcesses(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(root, ".local", "share"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, ".cache"))
+	testutil.TurnOffGoTelemetry(t)
 	dir, err := busDirFor("alpha")
 	if err != nil {
 		t.Fatal(err)
