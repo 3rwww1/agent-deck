@@ -36,6 +36,7 @@ type openCodeRouteWatch struct {
 type openCodeRouteLane struct {
 	servicePID int   // the service the lane last showed its session under; 0 is unknown
 	outages    int64 // the guard's failed checks at that time
+	watched    bool  // someone was on the pane since it last showed its session
 	homeSeen   bool  // the previous sweep saw the home title too
 }
 
@@ -70,16 +71,16 @@ func (w *openCodeRouteWatch) sweep(instances []*Instance) {
 		}
 		lane := w.lanes[inst.ID]
 		if info.Title != openCodeHomeTitle {
-			w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid, outages: outages}
+			w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid, outages: outages, watched: w.watched(inst)}
 			continue
 		}
-		// Home with no service change or outage since the lane showed its session is the user's own navigation.
-		if pid == 0 || (lane.servicePID == pid && lane.outages == outages) {
+		// Only someone on the pane can navigate home: with nobody there, a stall the guard never counted lost the route.
+		if pid == 0 || (lane.servicePID == pid && lane.outages == outages && lane.watched) {
 			continue
 		}
 		// A person on the pane may be typing, and a restart would drop the text: what they do next is theirs.
 		if w.watched(inst) {
-			w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid, outages: outages}
+			w.lanes[inst.ID] = openCodeRouteLane{servicePID: pid, outages: outages, watched: true}
 			continue
 		}
 		if !lane.homeSeen {
