@@ -1540,7 +1540,8 @@ func (s *Session) AbsentFromCache() bool {
 // positive hit in the default-socket cache (#755 guard) or a live PipeManager
 // control connection.
 func (s *Session) existsInProcess() bool {
-	if strings.TrimSpace(s.SocketName) == DefaultSocketName() {
+	onDefaultSocket := strings.TrimSpace(s.SocketName) == DefaultSocketName()
+	if onDefaultSocket {
 		if exists, cacheValid := sessionExistsFromCache(s.TmuxName()); cacheValid && exists {
 			return true
 		}
@@ -1548,6 +1549,12 @@ func (s *Session) existsInProcess() bool {
 	// If PipeManager has a live control connection, the session definitely exists.
 	if pm := GetPipeManager(); pm != nil {
 		if pm.IsConnected(s.TmuxName()) {
+			return true
+		}
+	}
+	if onDefaultSocket {
+		sessionCacheGate.refreshIfStale(RefreshSessionCache)
+		if exists, cacheValid := sessionExistsFromCache(s.TmuxName()); cacheValid && exists {
 			return true
 		}
 	}
@@ -1637,11 +1644,19 @@ func (s *Session) ExistsCached() bool {
 	return false
 }
 
+// refreshStaleCache skips sessions on other sockets: the shared caches describe the default server only.
+func (s *Session) refreshStaleCache(gate *cacheRefreshGate, refresh func()) {
+	if strings.TrimSpace(s.SocketName) == DefaultSocketName() {
+		gate.refreshIfStale(refresh)
+	}
+}
+
 // IsPaneDead returns true if the session's pane process has exited.
 // Uses the cached pane info (refreshed once per tick) for zero-cost lookups.
 // Falls back to a direct tmux query of the primary pane to avoid false
 // positives in multi-pane layouts.
 func (s *Session) IsPaneDead() bool {
+	s.refreshStaleCache(&paneCacheGate, RefreshPaneInfoCache)
 	if info, ok := GetCachedPaneInfo(s.TmuxName()); ok {
 		return info.Dead
 	}
@@ -1865,8 +1880,11 @@ func (s *Session) Kill() error {
 		// A positive activity cache can still describe the session just killed.
 		// Only a completed probe of this exact name proves teardown succeeded.
 		if exists, probeErr := s.ProbeExists(); probeErr == nil && !exists {
-			return nil
+			err = nil
 		}
+	}
+	if err == nil && strings.TrimSpace(s.SocketName) == DefaultSocketName() {
+		forgetSessionInCache(s.TmuxName())
 	}
 
 	return err
@@ -2358,6 +2376,7 @@ func (s *Session) DetectTool() string {
 
 	// A session created as "shell" can later launch a supported tool. Only
 	// promote it when the pane's current command identifies that tool.
+	s.refreshStaleCache(&paneCacheGate, RefreshPaneInfoCache)
 	if paneInfo, ok := GetCachedPaneInfo(s.TmuxName()); ok {
 		if tool := detectToolFromCommand(paneInfo.CurrentCommand); tool != "" {
 			s.rememberTool(tool)

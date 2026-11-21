@@ -35,6 +35,8 @@ func TestIssue2099_ProbeExistsIsExactAndUncached(t *testing.T) {
 
 	// A positive cache entry must not be trusted: the session is killed and
 	// the probe must report it gone even while the cache still lists it.
+	// Kill drops its own entry, so a stale listing is seeded after the kill.
+	require.NoError(t, live.Kill())
 	registerSessionInCache(live.Name)
 	sessionCacheMu.Lock()
 	sessionCacheTime = time.Now()
@@ -44,7 +46,6 @@ func TestIssue2099_ProbeExistsIsExactAndUncached(t *testing.T) {
 		delete(sessionCacheData, live.Name)
 		sessionCacheMu.Unlock()
 	})
-	require.NoError(t, live.Kill())
 	cached, valid := sessionExistsFromCache(live.Name)
 	require.True(t, cached && valid, "fixture: the cache must still list the killed session")
 	assert.True(t, live.Exists(), "fixture: Exists() trusts the positive cache entry, which is what ProbeExists must not do")

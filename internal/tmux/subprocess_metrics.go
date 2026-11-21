@@ -1,6 +1,9 @@
 package tmux
 
 import (
+	"errors"
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -137,4 +140,54 @@ func commandCombinedOutput(cmd *exec.Cmd) ([]byte, error) {
 		defer observeCommand(cmd)
 	}
 	return cmd.CombinedOutput()
+}
+
+// commandOutputUnpiped is commandOutput through unlinked files, so a child of tmux holding stdout open cannot stall it for tmuxSubprocessWaitDelay.
+func commandOutputUnpiped(cmd *exec.Cmd) ([]byte, error) {
+	stdout, err := unlinkedTempFile()
+	if err != nil {
+		return commandOutput(cmd)
+	}
+	defer stdout.Close()
+	stderr, err := unlinkedTempFile()
+	if err != nil {
+		return commandOutput(cmd)
+	}
+	defer stderr.Close()
+
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	runErr := commandRun(cmd)
+	out, err := readFromStart(stdout, -1)
+	if err != nil {
+		return nil, errors.Join(runErr, err)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		// Same cap as cmd.Output's stderr capture.
+		exitErr.Stderr, _ = readFromStart(stderr, 32<<10)
+	}
+	return out, runErr
+}
+
+func unlinkedTempFile() (*os.File, error) {
+	f, err := os.CreateTemp("", "agent-deck-tmux-out-*")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Remove(f.Name()); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func readFromStart(f *os.File, limit int64) ([]byte, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	var r io.Reader = f
+	if limit >= 0 {
+		r = io.LimitReader(f, limit)
+	}
+	return io.ReadAll(r)
 }
