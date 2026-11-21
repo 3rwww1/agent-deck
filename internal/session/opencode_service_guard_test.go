@@ -18,17 +18,19 @@ import (
 )
 
 type stubOpenCodeService struct {
-	mu         sync.Mutex
-	now        time.Time
-	stopped    bool
-	registered bool // the registration file names a live process
-	statuses   atomic.Int32
-	answer     atomic.Bool
-	rejects    atomic.Bool // answers the probe with an error instead of staying silent
-	refuses    atomic.Bool // refuses the connection, like a dead port behind a live registration
-	probes     atomic.Int32
-	starts     atomic.Int32
-	restarts   atomic.Int32
+	mu            sync.Mutex
+	now           time.Time
+	stopped       bool
+	registered    bool // the registration file names a live process
+	serverVersion string
+	statuses      atomic.Int32
+	answer        atomic.Bool
+	rejects       atomic.Bool // answers the probe with an error instead of staying silent
+	refuses       atomic.Bool // refuses the connection, like a dead port behind a live registration
+	failRestart   atomic.Bool
+	probes        atomic.Int32
+	starts        atomic.Int32
+	restarts      atomic.Int32
 }
 
 func (f *stubOpenCodeService) clock() time.Time {
@@ -74,20 +76,26 @@ func (f *stubOpenCodeService) guard(lockDir string) *openCodeServiceGuard {
 			f.stopped = false
 		case "restart":
 			f.restarts.Add(1)
+			if f.failRestart.Load() {
+				return errors.New("opencode service restart: failed")
+			}
 		}
 		return nil
 	}
-	g.probe = func(openCodeService) error {
+	g.probe = func(openCodeService) (string, error) {
 		f.probes.Add(1)
 		switch {
 		case f.refuses.Load():
-			return fmt.Errorf("%w: dial tcp 127.0.0.1:49374: connect: connection refused", errOpenCodeServiceUnreachable)
+			return "", fmt.Errorf("%w: dial tcp 127.0.0.1:49374: connect: connection refused", errOpenCodeServiceUnreachable)
 		case f.answer.Load():
-			return nil
+			f.mu.Lock()
+			version := f.serverVersion
+			f.mu.Unlock()
+			return version, nil
 		case f.rejects.Load():
-			return errors.New("opencode service health probe: HTTP 401 Unauthorized")
+			return "", errors.New("opencode service health probe: HTTP 401 Unauthorized")
 		}
-		return errOpenCodeServiceSilent
+		return "", errOpenCodeServiceSilent
 	}
 	return g
 }
@@ -262,14 +270,14 @@ func TestProbeOpenCodeService_TellsSilenceFromRejection(t *testing.T) {
 	refused := httptest.NewServer(http.NotFoundHandler())
 	refused.Close()
 
-	if err := probeOpenCodeService(openCodeService{URL: silent.URL}); !errors.Is(err, errOpenCodeServiceSilent) {
-		t.Fatalf("silent service: probe = %v, want %v", err, errOpenCodeServiceSilent)
+	if version, err := probeOpenCodeService(openCodeService{URL: silent.URL}); !errors.Is(err, errOpenCodeServiceSilent) {
+		t.Fatalf("silent service: probe = (%q, %v), want %v", version, err, errOpenCodeServiceSilent)
 	}
-	if err := probeOpenCodeService(openCodeService{URL: rejecting.URL}); err == nil || errors.Is(err, errOpenCodeServiceSilent) || errors.Is(err, errOpenCodeServiceUnreachable) {
-		t.Fatalf("401: probe = %v, want a rejection that is neither silence nor a refused connection", err)
+	if version, err := probeOpenCodeService(openCodeService{URL: rejecting.URL}); err == nil || errors.Is(err, errOpenCodeServiceSilent) || errors.Is(err, errOpenCodeServiceUnreachable) {
+		t.Fatalf("401: probe = (%q, %v), want a rejection that is neither silence nor a refused connection", version, err)
 	}
-	if err := probeOpenCodeService(openCodeService{URL: refused.URL}); !errors.Is(err, errOpenCodeServiceUnreachable) {
-		t.Fatalf("refused: probe = %v, want %v", err, errOpenCodeServiceUnreachable)
+	if version, err := probeOpenCodeService(openCodeService{URL: refused.URL}); !errors.Is(err, errOpenCodeServiceUnreachable) {
+		t.Fatalf("refused: probe = (%q, %v), want %v", version, err, errOpenCodeServiceUnreachable)
 	}
 }
 
@@ -402,11 +410,11 @@ func TestOpenCodeServiceGuard_HealthyProbeResetsTheBackoff(t *testing.T) {
 func hangProbe(f *stubOpenCodeService, g *openCodeServiceGuard) (probing, release chan struct{}) {
 	probing, release = make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	g.probe = func(openCodeService) error {
+	g.probe = func(openCodeService) (string, error) {
 		f.probes.Add(1)
 		once.Do(func() { close(probing) })
 		<-release
-		return errOpenCodeServiceSilent
+		return "", errOpenCodeServiceSilent
 	}
 	return probing, release
 }
