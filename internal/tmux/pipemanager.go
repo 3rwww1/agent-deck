@@ -78,7 +78,7 @@ func (pm *PipeManager) Connect(sessionName, socketName string) error {
 	// Background sessions are not wanted — connecting them is what scaled pipe
 	// count to instances×sessions. Silent no-op so existing callers (startup
 	// loop, new-session hook, reviver, sweep) need no per-call gating.
-	if !pm.wants(sessionName) {
+	if !pm.Wants(sessionName) {
 		return nil
 	}
 
@@ -394,8 +394,8 @@ func (pm *PipeManager) SetWantPipe(fn func(sessionName string) bool) {
 	pm.mu.Unlock()
 }
 
-// wants reports whether sessionName is currently wanted. nil predicate => true.
-func (pm *PipeManager) wants(sessionName string) bool {
+// Wants reports whether sessionName is currently wanted. nil predicate => true.
+func (pm *PipeManager) Wants(sessionName string) bool {
 	pm.mu.RLock()
 	fn := pm.wantPipe
 	pm.mu.RUnlock()
