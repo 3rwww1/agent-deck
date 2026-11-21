@@ -58,6 +58,12 @@ func requireSameVerdict(t *testing.T, got, want *Instance) {
 	}
 }
 
+// tmux.SubprocessStarts is process-wide: join the spawn watchers earlier tests left running so their tmux calls stay out of this count.
+func startsBeforeCount() int64 {
+	RetireSpawnWatchersForTest()
+	return tmux.SubprocessStarts()
+}
+
 // A pass re-lists a socket each time its listing reaches passSessionListMaxAge, which a pass slowed by load can outlast.
 func listingsPerSocket(wall time.Duration) int64 {
 	return 1 + int64(wall/passSessionListMaxAge)
@@ -91,8 +97,8 @@ func TestStatusUpdatePass_DeadRowsStartNoTmuxPerRow(t *testing.T) {
 	add("drp-both", sockB, "shell", StatusError) // live on A only: dead here
 
 	var pass StatusUpdatePass
+	before := startsBeforeCount()
 	t0 := time.Now()
-	before := tmux.SubprocessStarts()
 	for _, inst := range withPass {
 		_ = pass.UpdateStatusOnly(inst)
 	}
@@ -147,13 +153,13 @@ func TestStatusUpdatePass_CachedLiveRowsDoNotList(t *testing.T) {
 		withPass, plain = append(withPass, p), append(plain, q)
 	}
 	tmux.RefreshExistingSessions()
-	before := tmux.SubprocessStarts()
+	before := startsBeforeCount()
 	for _, inst := range plain {
 		_ = inst.updateStatus(nil, false)
 	}
 	plainStarts := tmux.SubprocessStarts() - before
 	tmux.RefreshExistingSessions()
-	before = tmux.SubprocessStarts()
+	before = startsBeforeCount()
 	var pass StatusUpdatePass
 	for _, inst := range withPass {
 		_ = pass.UpdateStatusOnly(inst)
@@ -191,8 +197,8 @@ func TestStatusUpdatePass_ConcurrentWorkersShareOneListingPerSocket(t *testing.T
 	close(rows)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
+	before := startsBeforeCount()
 	t0 := time.Now()
-	before := tmux.SubprocessStarts()
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
@@ -256,13 +262,13 @@ func TestStatusUpdatePass_UncachedLiveRowsCostOneListingPerSocket(t *testing.T) 
 		p, q := deadRowPair(name, sock, "shell")
 		withPass, plain = append(withPass, p), append(plain, q)
 	}
-	before := tmux.SubprocessStarts()
+	before := startsBeforeCount()
 	for _, inst := range plain {
 		_ = inst.updateStatus(nil, false)
 	}
 	plainStarts := tmux.SubprocessStarts() - before
+	before = startsBeforeCount()
 	t0 := time.Now()
-	before = tmux.SubprocessStarts()
 	var pass StatusUpdatePass
 	for _, inst := range withPass {
 		_ = pass.UpdateStatusOnly(inst)
@@ -396,7 +402,7 @@ func TestStatusUpdatePass_DeadLiveRowsCostOneHasSessionEach(t *testing.T) {
 		withPass, plain = append(withPass, p), append(plain, q)
 	}
 	var pass StatusUpdatePass
-	before := tmux.SubprocessStarts()
+	before := startsBeforeCount()
 	for _, inst := range withPass {
 		_ = pass.UpdateStatusOnly(inst)
 	}
